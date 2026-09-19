@@ -1,7 +1,6 @@
 import React from 'react';
-import { QrCode, UserPlus, ClipboardList, Settings, Shield, Ticket, Database } from 'lucide-react';
+import { QrCode, UserPlus, ClipboardList, Settings, Shield, Ticket } from 'lucide-react';
 import { ConnectionMode, StaffRole } from '../types/ticket';
-import { sheetClient } from '../lib/sheetClient';
 
 interface HeaderProps {
   activeTab: 'entry' | 'registration' | 'register' | 'passes' | 'settings';
@@ -24,8 +23,6 @@ export const Header: React.FC<HeaderProps> = ({
   setRole,
   summaryCounts
 }) => {
-  const isMongo = sheetClient.isMongoConnected();
-
   return (
     <header className="bg-gradient-to-r from-[#2A0C13] via-[#451622] to-[#2A0C13] text-white shadow-theatre sticky top-0 z-40 border-b border-hoh-gold/30">
       {/* Top Banner Ribbon */}
@@ -68,25 +65,35 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Right Meta Controls: Database Connection + Role Selector */}
+          {/* Right Meta Controls: Connection Status + Role Selector */}
           <div className="flex items-center gap-2 sm:gap-3">
-            {/* Live Database Connection Indicator */}
+            {/* Live Sheet Connection Indicator */}
             <button
               type="button"
               onClick={() => setActiveTab('settings')}
-              className="cursor-pointer group flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/50 hover:bg-black/70 border border-emerald-500/40 shadow-sm transition-all text-xs"
-              title="Click to view MongoDB database settings"
+              className="cursor-pointer group flex items-center gap-2 px-2.5 py-1.5 rounded-full bg-black/40 hover:bg-black/60 border border-hoh-gold/30 transition-all text-xs"
+              title="Click to configure Google Sheet connection"
             >
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+              <span className="relative flex h-2 w-2">
+                {connectionMode === 'connected' ? (
+                  <>
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </>
+                ) : connectionMode === 'connecting' ? (
+                  <>
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                  </>
+                ) : (
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-hoh-gold"></span>
+                )}
               </span>
-              <span className="hidden md:inline font-bold text-emerald-300 flex items-center gap-1.5">
-                <Database className="w-3.5 h-3.5 text-emerald-400" />
-                <span>MongoDB Atlas (Live)</span>
+              <span className="hidden md:inline font-medium text-stone-200">
+                {connectionMode === 'connected' ? 'Sheet Online' : connectionMode === 'connecting' ? 'Connecting...' : 'Device Mode'}
               </span>
-              <span className="md:hidden font-bold text-emerald-300">
-                MongoDB
+              <span className="md:hidden font-medium text-stone-200">
+                {connectionMode === 'connected' ? 'Sheet' : 'Device'}
               </span>
             </button>
 
@@ -203,10 +210,10 @@ export const Header: React.FC<HeaderProps> = ({
                   ? 'border-hoh-gold text-hoh-gold bg-black/30'
                   : 'border-transparent text-stone-300 hover:text-white hover:bg-white/5'
               }`}
-              title="Database & Sheet settings"
+              title="Google Sheet and App settings"
             >
               <Settings className="w-4 h-4" />
-              <span className="hidden sm:inline">Database & Setup</span>
+              <span className="hidden sm:inline">Sheet Setup</span>
             </button>
           </div>
         </nav>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  CheckCircle2, AlertCircle, RefreshCw, Copy, Check, 
-  ExternalLink, Database, Server, Zap, Table, ShieldCheck 
+  Settings, CheckCircle2, AlertCircle, RefreshCw, Copy, Check, 
+  ExternalLink, Database, Server, Zap, Table 
 } from 'lucide-react';
 import { ConnectionMode } from '../types/ticket';
 import { getStoredScriptUrl, setStoredScriptUrl, sheetClient } from '../lib/sheetClient';
@@ -21,28 +21,12 @@ export const ConnectionSettings: React.FC<ConnectionSettingsProps> = ({
 }) => {
   const [url, setUrl] = useState<string>('');
   const [testing, setTesting] = useState<boolean>(false);
-  const [mongoStatus, setMongoStatus] = useState<{ ok: boolean; totalTickets?: number; latencyMs?: number } | null>({ ok: true, totalTickets: 50, latencyMs: 42 });
   const [testResult, setTestResult] = useState<{ ok: boolean; latencyMs?: number; error?: string } | null>(null);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
 
   useEffect(() => {
     setUrl(getStoredScriptUrl());
-    checkMongoHealth();
   }, []);
-
-  const checkMongoHealth = async () => {
-    try {
-      const start = performance.now();
-      const res = await fetch('/api/health');
-      const latencyMs = Math.round(performance.now() - start);
-      if (res.ok) {
-        const json = await res.json();
-        setMongoStatus({ ok: true, totalTickets: json.totalTickets, latencyMs });
-      }
-    } catch {
-      setMongoStatus(null);
-    }
-  };
 
   const handleSaveAndTest = async () => {
     setTesting(true);
@@ -52,8 +36,8 @@ export const ConnectionSettings: React.FC<ConnectionSettingsProps> = ({
     sheetClient.setScriptUrl(cleanUrl);
 
     if (!cleanUrl) {
-      onConnectionChange('connected'); // MongoDB is connected!
-      setTestResult({ ok: true, error: 'Google Sheet disconnected. Running on MongoDB Atlas.' });
+      onConnectionChange('device');
+      setTestResult({ ok: true, error: 'Switched to Device Mode (Local Storage).' });
       setTesting(false);
       return;
     }
@@ -61,9 +45,15 @@ export const ConnectionSettings: React.FC<ConnectionSettingsProps> = ({
     try {
       const res = await sheetClient.testConnection(cleanUrl);
       setTestResult(res);
+      if (res.ok) {
+        onConnectionChange('connected');
+      } else {
+        onConnectionChange('device');
+      }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
       setTestResult({ ok: false, error: errMsg });
+      onConnectionChange('device');
     } finally {
       setTesting(false);
     }
@@ -73,6 +63,7 @@ export const ConnectionSettings: React.FC<ConnectionSettingsProps> = ({
     setUrl('');
     sheetClient.setScriptUrl('');
     setTestResult(null);
+    onConnectionChange('device');
   };
 
   const handleCopyScript = async () => {
@@ -95,153 +86,244 @@ export const ConnectionSettings: React.FC<ConnectionSettingsProps> = ({
       {/* Page Title */}
       <div>
         <h2 className="text-2xl font-serif font-bold text-hoh-burgundy flex items-center gap-2">
-          <span>Database & Backend Connections</span>
-          <span className="text-xs bg-emerald-100 text-emerald-800 font-sans font-semibold px-2 py-0.5 rounded-full border border-emerald-300">
-            MongoDB Atlas Live
+          <span>Google Sheet Backend Connection</span>
+          <span className="text-xs bg-hoh-gold/20 text-hoh-gold-dark font-sans font-semibold px-2 py-0.5 rounded-full border border-hoh-gold/40">
+            Live Integration
           </span>
         </h2>
         <p className="text-sm text-hoh-muted mt-0.5">
-          All ticket registrations, payments, and gate admissions are saved to your cloud database in real time.
+          Connect this portal to your production Google Sheet for real-time sales and gate admission syncing.
         </p>
       </div>
 
-      {/* Primary Database: MongoDB Atlas Card */}
-      <div className="bg-gradient-to-r from-[#1B3624] via-[#102B1B] to-[#1B3624] text-white p-6 rounded-2xl border-2 border-emerald-400/50 shadow-theatre space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center shrink-0">
-              <Database className="w-6 h-6 text-emerald-300" />
+      {/* Target Sheet Card */}
+      <div className="bg-gradient-to-r from-[#2A0C13] to-[#4A1622] text-white p-5 rounded-2xl border-2 border-hoh-gold/40 shadow-theatre flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-xl bg-emerald-600/30 border border-emerald-400/40 flex items-center justify-center shrink-0">
+            <Table className="w-6 h-6 text-emerald-300" />
+          </div>
+          <div>
+            <div className="text-[11px] text-hoh-gold font-mono uppercase tracking-wider font-bold">
+              Target Google Sheet Configured
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="font-bold text-lg text-white">MongoDB Atlas Cloud Database</h3>
-                <span className="text-[10px] font-mono font-bold uppercase bg-emerald-400/20 text-emerald-300 border border-emerald-400/40 px-2 py-0.5 rounded-full flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  CONNECTED
-                </span>
-              </div>
-              <p className="text-xs text-emerald-200/80 mt-0.5">
-                Primary persistent database engine for House of Humour
-              </p>
+            <div className="font-bold text-base text-white">
+              House of Humour &bull; Tickets Master
+            </div>
+            <div className="font-mono text-[11px] text-stone-300 mt-0.5 truncate max-w-sm sm:max-w-md">
+              ID: {TARGET_SHEET_ID}
             </div>
           </div>
-
-          <button
-            type="button"
-            onClick={checkMongoHealth}
-            className="self-start sm:self-auto px-3.5 py-1.5 bg-emerald-800/80 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 border border-emerald-600/40 transition-colors shadow-sm"
-          >
-            <RefreshCw className="w-3.5 h-3.5 text-emerald-300" />
-            <span>Ping Database</span>
-          </button>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-emerald-500/30 text-xs">
-          <div className="bg-black/30 p-2.5 rounded-xl border border-emerald-500/20">
-            <span className="text-stone-400 block text-[10px] uppercase font-mono">Cluster</span>
-            <span className="font-bold text-emerald-300 text-sm">Cluster0</span>
-          </div>
-          <div className="bg-black/30 p-2.5 rounded-xl border border-emerald-500/20">
-            <span className="text-stone-400 block text-[10px] uppercase font-mono">Database</span>
-            <span className="font-mono font-bold text-white text-xs">hoh_tickets_db</span>
-          </div>
-          <div className="bg-black/30 p-2.5 rounded-xl border border-emerald-500/20">
-            <span className="text-stone-400 block text-[10px] uppercase font-mono">Collection</span>
-            <span className="font-mono font-bold text-white text-xs">tickets (50)</span>
-          </div>
-          <div className="bg-black/30 p-2.5 rounded-xl border border-emerald-500/20">
-            <span className="text-stone-400 block text-[10px] uppercase font-mono">Atomic Writes</span>
-            <span className="font-bold text-emerald-400 text-xs flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5" /> Active
-            </span>
-          </div>
-        </div>
+        <a
+          href={TARGET_SHEET_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-hoh-gold hover:bg-amber-400 text-stone-950 font-bold text-xs rounded-xl shadow-sm transition-colors shrink-0"
+        >
+          <span>Open Google Sheet</span>
+          <ExternalLink className="w-3.5 h-3.5" />
+        </a>
       </div>
 
-      {/* Optional Secondary Sync: Google Sheet */}
-      <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <Table className="w-5 h-5 text-hoh-burgundy" />
-            <h3 className="font-bold text-base text-hoh-burgundy">
-              Secondary Sync: Google Sheet
+      {/* Google Sheet Web App Connection Box */}
+      <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 p-6 space-y-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-bold text-base text-hoh-burgundy flex items-center gap-2">
+              <Server className="w-5 h-5 text-hoh-gold" />
+              <span>Google Apps Script Web App Deployment URL</span>
             </h3>
+            <p className="text-xs text-stone-500 mt-1">
+              Enter the Web App URL generated from your Google Sheet's Apps Script project.
+            </p>
           </div>
 
-          <a
-            href={TARGET_SHEET_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs text-hoh-burgundy font-bold underline flex items-center gap-1 hover:text-hoh-gold-dark"
-          >
-            <span>Open Sheet (1nJAMZQnqbs...)</span>
-            <ExternalLink className="w-3.5 h-3.5" />
-          </a>
+          <div className="shrink-0">
+            {url ? (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>Configured</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                <span>Device Mode (Local)</span>
+              </span>
+            )}
+          </div>
         </div>
-
-        <p className="text-xs text-stone-500">
-          Optionally link your Google Sheet Web App if you'd like changes to simultaneously sync with your Google Sheet.
-        </p>
 
         <div>
           <label htmlFor="script-url" className="block text-xs font-semibold uppercase tracking-wider text-stone-700 mb-1.5">
-            Apps Script Web App URL
+            Web App URL (https://script.google.com/macros/s/.../exec)
           </label>
           <input
             id="script-url"
             type="url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://script.google.com/macros/s/.../exec"
-            className="w-full px-4 py-2.5 rounded-xl border border-stone-300 font-mono text-sm focus:border-hoh-burgundy focus:ring-1 focus:ring-hoh-burgundy"
+            placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 font-mono text-sm focus:border-hoh-burgundy focus:ring-2 focus:ring-hoh-burgundy/20 placeholder-stone-400"
           />
         </div>
 
-        <div className="flex items-center gap-3">
+        {/* Test Result Message */}
+        {testResult && (
+          <div
+            className={`p-4 rounded-xl text-xs sm:text-sm font-medium flex items-start gap-2.5 ${
+              testResult.ok
+                ? 'bg-emerald-50 border border-emerald-300 text-emerald-900'
+                : 'bg-rose-50 border border-rose-300 text-rose-900'
+            }`}
+          >
+            {testResult.ok ? (
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+            )}
+            <div>
+              {testResult.ok ? (
+                <div>
+                  <strong>Sheet Connection Verified!</strong>
+                  {testResult.latencyMs !== undefined && (
+                    <span className="ml-2 font-mono text-xs opacity-80">
+                      (Latency: {testResult.latencyMs} ms)
+                    </span>
+                  )}
+                  <p className="text-xs text-emerald-700 mt-0.5">
+                    Ticket registrations and gate entry locks are now synchronized live with your Google Sheet.
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <strong>Connection Status:</strong> {testResult.error}
+                  <p className="text-xs text-rose-700 mt-0.5">
+                    Check that the Apps Script deployment has "Who has access: Anyone" selected.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex flex-wrap items-center gap-3 pt-2">
           <button
             type="button"
             disabled={testing}
             onClick={handleSaveAndTest}
-            className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs rounded-xl border border-stone-300 flex items-center gap-2"
+            className="px-5 py-2.5 bg-hoh-burgundy hover:bg-hoh-burgundy-light text-white font-semibold text-xs rounded-xl shadow-sm transition-colors flex items-center gap-2 disabled:opacity-50"
           >
-            {testing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5 text-hoh-burgundy" />}
-            <span>Test Sheet Sync</span>
+            {testing ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin text-hoh-gold" />
+                <span>Verifying Endpoint...</span>
+              </>
+            ) : (
+              <>
+                <Zap className="w-4 h-4 text-hoh-gold" />
+                <span>Save & Test Connection</span>
+              </>
+            )}
           </button>
 
           {url && (
             <button
               type="button"
               onClick={handleDisconnect}
-              className="text-xs text-stone-500 hover:text-rose-700 underline"
+              className="px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl transition-colors"
             >
-              Clear
+              Disconnect & Use Device Mode
             </button>
           )}
         </div>
+      </div>
+
+      {/* Step-by-step Setup Guide */}
+      <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="font-bold text-base text-hoh-burgundy flex items-center gap-2">
+            <Table className="w-5 h-5 text-hoh-gold" />
+            <span>How to Connect Your Google Sheet in 30 Seconds</span>
+          </h3>
+
+          <button
+            type="button"
+            onClick={handleCopyScript}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-900 text-xs font-bold rounded-lg transition-colors border border-stone-300"
+          >
+            {copiedCode ? (
+              <>
+                <Check className="w-4 h-4 text-emerald-600" />
+                <span>Copied Code.gs!</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-4 h-4 text-hoh-burgundy" />
+                <span>Copy Apps Script Code</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        <ol className="list-decimal list-inside space-y-3 text-sm text-stone-700">
+          <li className="p-3 bg-stone-50 rounded-xl">
+            Open your Google Sheet:{' '}
+            <a
+              href={TARGET_SHEET_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-bold text-hoh-burgundy underline hover:text-hoh-gold-dark"
+            >
+              Open Sheet (1nJAMZQnqbsyciIHz-x4xaRiNzgcRPK861ae1No-tBGI)
+            </a>
+          </li>
+          <li className="p-3 bg-stone-50 rounded-xl">
+            In the top menu, click <strong>Extensions &rarr; Apps Script</strong>.
+          </li>
+          <li className="p-3 bg-stone-50 rounded-xl">
+            Click <strong>"Copy Apps Script Code"</strong> above, paste it into the editor (replacing any existing code), and save (<kbd className="bg-stone-200 px-1.5 py-0.5 rounded text-xs font-mono font-bold">Ctrl+S</kbd>).
+          </li>
+          <li className="p-3 bg-stone-50 rounded-xl">
+            In the toolbar function dropdown, select <code className="text-xs bg-stone-200 px-1.5 py-0.5 rounded font-bold text-hoh-burgundy">initSheet</code> and click <strong>Run</strong>.
+            <p className="text-xs text-stone-500 mt-1">
+              (Grant permission if prompted. This will automatically format headers and create all 50 rows from <span className="font-mono font-bold">HOH001</span> to <span className="font-mono font-bold">HOH050</span> in your Google Sheet!)
+            </p>
+          </li>
+          <li className="p-3 bg-stone-50 rounded-xl">
+            Click <strong>Deploy &rarr; New Deployment</strong>:
+            <ul className="list-disc list-inside mt-1 ml-4 space-y-0.5 text-xs text-stone-600 font-medium">
+              <li>Type: <strong>Web App</strong></li>
+              <li>Execute as: <strong>Me</strong></li>
+              <li>Who has access: <strong>Anyone</strong></li>
+            </ul>
+          </li>
+          <li className="p-3 bg-stone-50 rounded-xl">
+            Copy the <strong>Web App URL</strong>, paste it into the input above, and click <strong>Save & Test Connection</strong>!
+          </li>
+        </ol>
       </div>
 
       {/* Dry Run / Reset Box */}
       <div className="bg-stone-50 rounded-2xl border border-stone-300 p-5">
         <h3 className="font-bold text-sm text-stone-900 flex items-center gap-2 mb-1">
           <Database className="w-4 h-4 text-hoh-burgundy" />
-          <span>Reset Database Records</span>
+          <span>Local Device Data Reset</span>
         </h3>
         <p className="text-xs text-stone-600 mb-3">
-          Reset all 50 tickets in MongoDB Atlas to clean unentered status before doors open.
+          Clear local test bookings and reset all 50 tickets to clean unentered status before doors open.
         </p>
 
         <button
           type="button"
-          onClick={async () => {
-            if (window.confirm('Reset all 50 tickets HOH001-HOH050 in MongoDB to unentered state?')) {
-              await sheetClient.resetDatabase();
+          onClick={() => {
+            if (window.confirm('Reset all local tickets HOH001-HOH050 to initial unentered state?')) {
               onResetDatabase();
-              alert('MongoDB records reset successfully.');
             }
           }}
           className="px-4 py-2 bg-stone-200 hover:bg-rose-100 hover:text-rose-900 text-stone-700 font-bold text-xs rounded-xl transition-colors border border-stone-300"
         >
-          Reset All 50 Tickets in MongoDB
+          Reset Local Database
         </button>
       </div>
     </div>

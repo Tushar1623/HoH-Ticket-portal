@@ -4,6 +4,9 @@ import { isValidTicketCode, normalizeTicketCode, VALID_TICKET_CODES } from './ti
 const LOCAL_STORAGE_KEY = 'hoh_tickets_db';
 const SCRIPT_URL_KEY = 'hoh_apps_script_url';
 
+/**
+ * Creates empty initial 50 tickets HOH001 through HOH050
+ */
 export function createDefaultTickets(): Record<string, TicketRecord> {
   const map: Record<string, TicketRecord> = {};
   const now = new Date().toISOString();
@@ -26,10 +29,16 @@ export function createDefaultTickets(): Record<string, TicketRecord> {
   return map;
 }
 
+/**
+ * Gets configured Apps Script Web App URL from localStorage
+ */
 export function getStoredScriptUrl(): string {
   return localStorage.getItem(SCRIPT_URL_KEY) || '';
 }
 
+/**
+ * Saves Apps Script Web App URL to localStorage
+ */
 export function setStoredScriptUrl(url: string): void {
   if (url.trim()) {
     localStorage.setItem(SCRIPT_URL_KEY, url.trim());
@@ -38,6 +47,9 @@ export function setStoredScriptUrl(url: string): void {
   }
 }
 
+/**
+ * Reads local storage ticket database
+ */
 export function getLocalTickets(): Record<string, TicketRecord> {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -46,13 +58,17 @@ export function getLocalTickets(): Record<string, TicketRecord> {
       saveLocalTickets(initial);
       return initial;
     }
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return parsed;
   } catch (e) {
     console.error('Error reading local tickets:', e);
     return createDefaultTickets();
   }
 }
 
+/**
+ * Writes tickets to local storage
+ */
 export function saveLocalTickets(tickets: Record<string, TicketRecord>): void {
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(tickets));
@@ -61,6 +77,9 @@ export function saveLocalTickets(tickets: Record<string, TicketRecord>): void {
   }
 }
 
+/**
+ * Calculates summary statistics for all 50 tickets
+ */
 export function calculateSummary(tickets: Record<string, TicketRecord>): SummaryCounts {
   const list = Object.values(tickets);
   let registered = 0;
@@ -97,9 +116,11 @@ export function calculateSummary(tickets: Record<string, TicketRecord>): Summary
   };
 }
 
+/**
+ * API client to interact with Google Sheet (Apps Script) or Local Storage
+ */
 export class SheetClient {
   private scriptUrl: string;
-  private mongoConnected: boolean = false;
 
   constructor() {
     this.scriptUrl = getStoredScriptUrl();
@@ -114,83 +135,50 @@ export class SheetClient {
     return this.scriptUrl;
   }
 
-  public isMongoConnected(): boolean {
-    return this.mongoConnected;
-  }
-
   public getConnectionMode(): ConnectionMode {
-    if (this.mongoConnected) return 'connected';
-    if (this.scriptUrl) return 'connected';
-    return 'device';
+    if (!this.scriptUrl) return 'device';
+    return 'connected';
   }
 
   /**
-   * Health check for MongoDB / Backend / Apps Script
+   * Health check / Connection test
    */
-  public async testConnection(url?: string): Promise<{ ok: boolean; latencyMs: number; error?: string; database?: string }> {
-    const start = performance.now();
-
-    // 1. Try MongoDB Atlas backend via /api/health
-    try {
-      const res = await fetch('/api/health');
-      const latencyMs = Math.round(performance.now() - start);
-      if (res.ok) {
-        const json = await res.json();
-        if (json && json.ok) {
-          this.mongoConnected = true;
-          return {
-            ok: true,
-            latencyMs,
-            database: `MongoDB Atlas (${json.cluster} - ${json.dbName})`
-          };
-        }
-      }
-    } catch {
-      this.mongoConnected = false;
-    }
-
-    // 2. Try Apps Script if URL provided
+  public async testConnection(url?: string): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
     const targetUrl = url || this.scriptUrl;
-    if (targetUrl) {
-      try {
-        const pingUrl = `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}action=health&_t=${Date.now()}`;
-        const res = await fetch(pingUrl);
-        const latencyMs = Math.round(performance.now() - start);
-        if (res.ok) {
-          const json = await res.json();
-          if (json && json.ok) {
-            return { ok: true, latencyMs, database: 'Google Sheets (Apps Script)' };
-          }
-        }
-      } catch (err) {
-        const latencyMs = Math.round(performance.now() - start);
-        return { ok: false, latencyMs, error: String(err) };
-      }
+    if (!targetUrl) {
+      return { ok: false, latencyMs: 0, error: 'No Apps Script URL provided.' };
     }
 
-    return { ok: false, latencyMs: 0, error: 'Connecting to database...' };
+    const start = performance.now();
+    try {
+      const pingUrl = `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}action=health&_t=${Date.now()}`;
+      const res = await fetch(pingUrl, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+      const latencyMs = Math.round(performance.now() - start);
+
+      if (!res.ok) {
+        return { ok: false, latencyMs, error: `HTTP ${res.status}: ${res.statusText}` };
+      }
+
+      const json = await res.json();
+      if (json && json.ok) {
+        return { ok: true, latencyMs };
+      } else {
+        return { ok: false, latencyMs, error: json.error || 'Invalid API response format' };
+      }
+    } catch (err: unknown) {
+      const latencyMs = Math.round(performance.now() - start);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return { ok: false, latencyMs, error: `Connection failed: ${errMsg}` };
+    }
   }
 
   /**
    * Fetch all 50 ticket records
    */
   public async fetchTickets(): Promise<ApiResponse<Record<string, TicketRecord>>> {
-    // 1. Try MongoDB Atlas backend
-    try {
-      const res = await fetch('/api/tickets');
-      if (res.ok) {
-        const json = await res.json();
-        if (json && json.ok && json.data) {
-          this.mongoConnected = true;
-          saveLocalTickets(json.data); // backup
-          return { ok: true, data: json.data };
-        }
-      }
-    } catch {
-      this.mongoConnected = false;
-    }
-
-    // 2. Try Google Apps Script if configured
     if (this.scriptUrl) {
       try {
         const url = `${this.scriptUrl}${this.scriptUrl.includes('?') ? '&' : '?'}action=list&_t=${Date.now()}`;
@@ -198,6 +186,7 @@ export class SheetClient {
         if (res.ok) {
           const json = await res.json();
           if (json && json.ok && json.data) {
+            // Update local backup
             saveLocalTickets(json.data);
             return { ok: true, data: json.data };
           }
@@ -207,7 +196,7 @@ export class SheetClient {
       }
     }
 
-    // 3. Local Storage fallback
+    // Local Storage fallback
     const localData = getLocalTickets();
     return { ok: true, data: localData };
   }
@@ -221,17 +210,22 @@ export class SheetClient {
       return { ok: false, error: `Invalid ticket code '${normalized}'. Range is HOH001-HOH050.` };
     }
 
-    // Try MongoDB backend
-    try {
-      const res = await fetch(`/api/tickets/${normalized}`);
-      if (res.ok) {
-        const json = await res.json();
-        if (json && json.ok && json.data) {
-          return { ok: true, data: json.data };
+    if (this.scriptUrl) {
+      try {
+        const res = await fetch(this.scriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // Apps Script preferred
+          body: JSON.stringify({ action: 'lookup', code: normalized })
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.ok && json.data) {
+            return { ok: true, data: json.data };
+          }
         }
+      } catch (err) {
+        console.warn('Google Sheet lookup failed, checking local store:', err);
       }
-    } catch {
-      // ignore
     }
 
     const localData = getLocalTickets();
@@ -244,7 +238,7 @@ export class SheetClient {
   }
 
   /**
-   * Register or update buyer details (Atomic MongoDB upsert)
+   * Register or update buyer details (FR 01 - FR 05)
    */
   public async upsertBuyer(record: Partial<TicketRecord> & { code: string }): Promise<ApiResponse<TicketRecord>> {
     const normalized = normalizeTicketCode(record.code);
@@ -252,30 +246,6 @@ export class SheetClient {
       return { ok: false, error: `Invalid code ${record.code}. Range is HOH001 to HOH050.` };
     }
 
-    // 1. Send to MongoDB backend
-    try {
-      const res = await fetch('/api/tickets/upsert', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ record: { ...record, code: normalized } })
-      });
-
-      if (res.ok) {
-        const json = await res.json();
-        if (json && json.ok && json.data) {
-          this.mongoConnected = true;
-          // Update local cache
-          const localData = getLocalTickets();
-          localData[normalized] = json.data;
-          saveLocalTickets(localData);
-          return { ok: true, data: json.data, message: `Buyer details saved to MongoDB Atlas (${normalized})!` };
-        }
-      }
-    } catch {
-      this.mongoConnected = false;
-    }
-
-    // 2. Fallback to Local Storage
     const now = new Date().toISOString();
     const localData = getLocalTickets();
     const existing = localData[normalized] || {
@@ -297,13 +267,46 @@ export class SheetClient {
       updatedBy: record.updatedBy || 'Staff'
     };
 
+    // If online with Sheet
+    if (this.scriptUrl) {
+      try {
+        const res = await fetch(this.scriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'upsert',
+            record: updatedRecord
+          })
+        });
+
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.ok && json.data) {
+            localData[normalized] = json.data;
+            saveLocalTickets(localData);
+            return { ok: true, data: json.data, message: 'Saved to Google Sheet successfully!' };
+          } else {
+            return { ok: false, error: json.error || 'Failed saving to Sheet' };
+          }
+        }
+      } catch (err: unknown) {
+        console.warn('Sheet upsert failed, saving to local device:', err);
+      }
+    }
+
+    // Save locally
     localData[normalized] = updatedRecord;
     saveLocalTickets(localData);
-    return { ok: true, data: updatedRecord, message: 'Saved to Device Storage.' };
+    return { 
+      ok: true, 
+      data: updatedRecord, 
+      message: this.scriptUrl ? 'Sheet offline. Saved to Device Storage.' : 'Saved to Device Storage.' 
+    };
   }
 
   /**
-   * Mark ticket as Entered (Atomic Duplicate Prevention on MongoDB)
+   * Mark ticket as Entered (FR 10, FR 11, BR 05, BR 06)
+   * Prevents duplicate admissions atomically
    */
   public async markEntered(code: string, staffRole: string = 'Entry Staff'): Promise<ApiResponse<TicketRecord>> {
     const normalized = normalizeTicketCode(code);
@@ -311,30 +314,41 @@ export class SheetClient {
       return { ok: false, error: 'Invalid ticket code' };
     }
 
-    // 1. Try MongoDB atomic mark-entered
-    try {
-      const res = await fetch('/api/tickets/mark-entered', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: normalized, staffId: staffRole })
-      });
+    const now = new Date().toISOString();
 
-      const json = await res.json();
-      if (res.ok && json && json.ok && json.data) {
-        this.mongoConnected = true;
-        const localData = getLocalTickets();
-        localData[normalized] = json.data;
-        saveLocalTickets(localData);
-        return { ok: true, data: json.data, message: `Admission confirmed! Marked Entered in MongoDB.` };
-      } else if (json && json.error) {
-        // Specific business error returned by MongoDB (e.g. Already Entered or Not Registered)
-        return { ok: false, error: json.error };
+    // Check remote Google Sheet if connected
+    if (this.scriptUrl) {
+      try {
+        const res = await fetch(this.scriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'markEntered',
+            code: normalized,
+            staffId: staffRole,
+            timestamp: now
+          })
+        });
+
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.ok && json.data) {
+            // Update local cache
+            const localData = getLocalTickets();
+            localData[normalized] = json.data;
+            saveLocalTickets(localData);
+            return { ok: true, data: json.data, message: 'Ticket marked Entered successfully!' };
+          } else {
+            // Server error / already entered on sheet
+            return { ok: false, error: json.error || 'Failed to mark entered on Sheet' };
+          }
+        }
+      } catch (err) {
+        console.warn('Network error marking entered on Sheet, falling back to local:', err);
       }
-    } catch {
-      this.mongoConnected = false;
     }
 
-    // 2. Fallback to Local Storage check
+    // Local Storage atomic check
     const localData = getLocalTickets();
     const existing = localData[normalized];
 
@@ -353,7 +367,7 @@ export class SheetClient {
       };
     }
 
-    const now = new Date().toISOString();
+    // Mark entered
     existing.entered = true;
     existing.enteredAt = now;
     existing.updatedAt = now;
@@ -370,17 +384,8 @@ export class SheetClient {
   }
 
   /**
-   * Reset database
+   * Reset local storage to initial clean 50 tickets
    */
-  public async resetDatabase(): Promise<void> {
-    try {
-      await fetch('/api/tickets/reset', { method: 'POST' });
-    } catch {
-      // ignore
-    }
-    this.resetLocalDatabase();
-  }
-
   public resetLocalDatabase(): Record<string, TicketRecord> {
     const clean = createDefaultTickets();
     saveLocalTickets(clean);
