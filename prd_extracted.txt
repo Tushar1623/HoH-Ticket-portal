@@ -1,0 +1,1105 @@
+HOUSE OF HUMOUR
+
+HOH Ticket Management and Entry Verification Platform
+
+Product Requirements Document
+
+This document defines the coding requirements for the HOH ticket portal. The product will register buyers against pre-generated ticket codes, connect records to a Google Sheet, verify QR codes at the venue, and prevent the same ticket from being admitted twice.
+
+Document item
+
+Value
+
+Product
+
+HOH Ticket Portal
+
+Ticket range
+
+HOH001 to HOH050
+
+Primary users
+
+HOH sales team and venue entry team
+
+Data source
+
+Google Sheets through Google Apps Script
+
+Target devices
+
+Mobile phones, tablets, and desktop browsers
+
+Version
+
+1.0
+
+Status
+
+Ready for development
+
+Product decision
+
+Build one responsive web application with three working areas: buyer registration, venue entry verification, and ticket administration. The Google Sheet remains the shared source of truth. Device storage may be used only as a temporary fallback when the Sheet connection is unavailable.
+
+Success at launch
+
+A staff member can register a buyer against any unused code from HOH001 to HOH050.
+
+Entry staff can scan or type a code and see whether the ticket is valid, registered, and already used.
+
+A valid unused ticket can be marked Entered once. Every later attempt is blocked as a duplicate.
+
+Updates from multiple phones appear in the same Google Sheet and remain consistent.
+
+Product overview
+
+Problem
+
+HOH already has ticket codes and QR graphics, but buyer details and venue entry status need one controlled system. Manual lists make it difficult to confirm who bought a ticket, whether payment was collected, and whether the same QR has already been used.
+
+Product goal
+
+The portal will give the sales and venue teams a shared, mobile-friendly workflow. Each ticket code will have one buyer record and one entry status. Google Sheets will store the operational data so nontechnical staff can review or correct records when necessary.
+
+Goals
+
+Register buyer and payment details in less than one minute.
+
+Verify a ticket in less than five seconds after scanning or typing the code.
+
+Prevent duplicate admission even when two staff members scan the same code from different phones.
+
+Make all 50 tickets searchable by code, buyer name, phone number, payment status, and entry status.
+
+Keep the interface consistent with the House of Humour burgundy and gold visual identity.
+
+Items outside the first release
+
+Online payment collection and payment gateway integration
+
+Automatic WhatsApp or email delivery of tickets
+
+Ticket generation or QR image generation
+
+Seat maps and reserved seating
+
+BookMyShow synchronization
+
+Public customer accounts or customer self-service
+
+Assumptions
+
+The QR payload is the exact ticket code, such as HOH017. If an existing QR stores a URL or another payload, a mapping field must be added before launch.
+
+One ticket code represents one booking. The Guests field stores the number of people covered by that booking.
+
+Entry staff have internet access at the venue. Offline support is a future enhancement and is not a launch requirement.
+
+Users and permissions
+
+Role
+
+Main tasks
+
+Allowed actions
+
+Restrictions
+
+Sales staff
+
+Record buyer and payment details
+
+Create or update buyer records and view tickets
+
+Cannot reverse an entry without administrator permission
+
+Entry staff
+
+Verify QR codes at the venue
+
+Look up tickets and mark valid tickets Entered
+
+Cannot change buyer or payment details
+
+Administrator
+
+Maintain the system
+
+All sales and entry actions plus correction and connection settings
+
+Must protect the Google Apps Script URL and admin access
+
+Viewer
+
+Monitor attendance
+
+Read dashboard and ticket list
+
+Cannot edit records or mark entry
+
+Access model
+
+The production version should use authenticated staff access. If authentication is deferred for the first event, the deployed site must remain private and the Apps Script URL must not be shared publicly. The application must separate sales and entry actions in the interface even when one person performs both roles.
+
+Primary user journeys
+
+1. Sales staff open Buyer Registration, select the printed ticket code, enter the buyer and payment details, and save the record.
+
+2. Entry staff open Check Entry, scan the QR code or type its value, review the buyer and status, and select Mark as Entered.
+
+3. The system writes the entry timestamp atomically. If the ticket is already entered, the system blocks the action and shows the previous entry time.
+
+4. An administrator searches the ticket register to review available, registered, paid, pending, entered, and not entered tickets.
+
+Functional requirements
+
+Buyer registration
+
+ID
+
+Requirement
+
+Acceptance condition
+
+FR 01
+
+Show ticket codes HOH001 through HOH050 in a controlled selector.
+
+No code outside the approved range can be saved.
+
+FR 02
+
+Collect buyer name, phone, email, guest count, payment status, amount, and notes.
+
+Buyer name and phone are required. Other fields may be optional.
+
+FR 03
+
+Allow an existing buyer record to be updated without changing its ticket code.
+
+The update keeps the original registration time and current entry status.
+
+FR 04
+
+Prevent one ticket code from creating multiple rows.
+
+Saving the same code updates its existing row.
+
+FR 05
+
+Show a clear success or error message after every save.
+
+The user can tell whether the Google Sheet accepted the record.
+
+Ticket verification
+
+ID
+
+Requirement
+
+Acceptance condition
+
+FR 06
+
+Accept a QR scan or manual ticket code.
+
+Both methods use the same normalization and lookup logic.
+
+FR 07
+
+Normalize input by trimming spaces and converting letters to uppercase.
+
+Inputs such as hoh001 and HOH001 return the same record.
+
+FR 08
+
+Classify a lookup as Invalid, Not Registered, Valid, or Already Entered.
+
+Only Valid tickets display the Mark as Entered action.
+
+FR 09
+
+Display buyer name, phone, guest count, payment status, and ticket code before entry.
+
+Entry staff can confirm the buyer before admitting them.
+
+FR 10
+
+Mark entry once and store a server generated timestamp.
+
+The Sheet changes Entered to true and records Entered At.
+
+FR 11
+
+Block repeat admission.
+
+A second scan returns Already Entered and never overwrites the first timestamp.
+
+Ticket administration
+
+ID
+
+Requirement
+
+Acceptance condition
+
+FR 12
+
+Show all 50 ticket records in one searchable table.
+
+Search matches ticket code, buyer name, phone, payment status, and entry status.
+
+FR 13
+
+Show summary counts for Registered, Entered, and Available tickets.
+
+Counts update after each successful save or entry action.
+
+FR 14
+
+Allow an administrator to open a ticket from the list.
+
+Selecting a row opens the corresponding ticket verification view.
+
+FR 15
+
+Show the Google Sheet connection status.
+
+The header displays Sheet Connected, Connecting, or Device Mode.
+
+FR 16
+
+Provide a controlled connection settings screen.
+
+Only administrators can add, test, replace, or disconnect the Apps Script endpoint.
+
+Business rules
+
+Rule
+
+Definition
+
+BR 01
+
+Valid ticket codes match HOH001 through HOH050 exactly after normalization.
+
+BR 02
+
+The QR payload must resolve to one ticket code. Unknown payloads are invalid.
+
+BR 03
+
+A ticket may be registered even when payment is pending.
+
+BR 04
+
+A ticket without a buyer name cannot be marked Entered.
+
+BR 05
+
+The first successful entry timestamp is permanent unless an administrator performs a documented correction.
+
+BR 06
+
+Entry updates require a lock or conditional write so two devices cannot admit the same ticket simultaneously.
+
+BR 07
+
+A cancelled or refunded ticket must not be admitted. Add these payment or ticket states before using them operationally.
+
+BR 08
+
+Guest count must be an integer from 1 to 10 unless HOH approves a different limit.
+
+Data model
+
+Google Sheet columns
+
+Column
+
+Type
+
+Required
+
+Purpose
+
+Code
+
+Text
+
+Yes
+
+Unique ticket identifier such as HOH001
+
+QR Payload
+
+Text
+
+Conditional
+
+Exact decoded value when it differs from Code
+
+Buyer Name
+
+Text
+
+For registration
+
+Name used at the venue
+
+Phone
+
+Text
+
+For registration
+
+Buyer contact number stored as text
+
+Email
+
+Text
+
+No
+
+Optional contact address
+
+Guests
+
+Integer
+
+Yes
+
+Number of people covered by the ticket
+
+Payment Status
+
+Enum
+
+Yes
+
+Pending, Paid, Complimentary, Refunded, or Cancelled
+
+Amount
+
+Number
+
+No
+
+Amount collected in Indian rupees
+
+Notes
+
+Text
+
+No
+
+Seat, source, or operational note
+
+Entered
+
+Boolean
+
+Yes
+
+False until the booking enters
+
+Entered At
+
+Date time
+
+When entered
+
+Server generated entry timestamp
+
+Registered At
+
+Date time
+
+When registered
+
+Original buyer registration timestamp
+
+Updated At
+
+Date time
+
+Yes
+
+Latest record update timestamp
+
+Updated By
+
+Text
+
+Recommended
+
+Staff identity for audit purposes
+
+Data constraints
+
+Code is the unique key and must never be reassigned after entry.
+
+Phone numbers are text values so leading zeros and country codes remain intact.
+
+All timestamps use ISO 8601 in storage and display in the venue local time.
+
+The application must read column names from a fixed schema or validate the header row before processing records.
+
+The first 50 data rows must map predictably to HOH001 through HOH050, or the backend must find rows by Code instead of row number.
+
+System architecture
+
+Layer
+
+Recommended implementation
+
+Responsibility
+
+Web interface
+
+React and TypeScript
+
+Forms, QR camera access, status display, search, and responsive layout
+
+UI system
+
+Tailwind CSS and reusable components
+
+Consistent form controls, tabs, tables, dialogs, badges, and alerts
+
+Integration API
+
+Google Apps Script Web App
+
+Validate requests, lock writes, read and update the Sheet, and return JSON
+
+Data storage
+
+Google Sheets
+
+Shared ticket records visible to authorized HOH staff
+
+Hosting
+
+HTTPS capable static or server rendered host
+
+Serve the portal and permit camera access on mobile devices
+
+Authentication
+
+Private site access or staff sign in
+
+Prevent unauthorized use of registration and entry tools
+
+Request flow
+
+1. The browser validates the form or scanned code before sending a request.
+
+2. The Apps Script endpoint validates the action and ticket code again on the server.
+
+3. For entry actions, Apps Script acquires a document lock and reads the current Entered value.
+
+4. The backend writes the update only when the ticket is registered and unused.
+
+5. The backend returns the current ticket record. The interface refreshes its local view from that response.
+
+Suggested source structure
+
+Path
+
+Purpose
+
+app or src pages
+
+Application shell and primary ticket workspace
+
+components ticket
+
+Registration form, entry result, ticket table, QR scanner, and summary cards
+
+lib ticketRules ts
+
+Code normalization, status calculation, and shared validation
+
+lib sheetClient ts
+
+Google Apps Script request methods and response parsing
+
+types ticket ts
+
+TicketRecord and API response types
+
+public backend gs
+
+Google Apps Script source supplied to the Sheet owner
+
+tests
+
+Rule, integration, and user flow tests
+
+API contract
+
+The Google Apps Script Web App exposes a small JSON API. Every response uses an ok boolean. Failed requests include an error message suitable for staff display after sensitive details are removed.
+
+Action
+
+Method
+
+Input
+
+Successful result
+
+list
+
+GET
+
+No body
+
+All ticket records
+
+lookup
+
+POST
+
+code
+
+Current ticket record
+
+upsert
+
+POST
+
+Ticket buyer fields
+
+Saved ticket record
+
+markEntered
+
+POST
+
+code
+
+Ticket record with Entered true and timestamp
+
+health
+
+GET
+
+No body
+
+Service and Sheet connection status
+
+Example record
+
+{  "code": "HOH017",  "buyerName": "Sample Buyer",  "phone": "+91XXXXXXXXXX",  "guests": 2,  "paymentStatus": "Paid",  "amount": 1000,  "entered": false,  "enteredAt": ""}
+
+Required server validations
+
+Reject unrecognized actions and malformed JSON.
+
+Reject codes outside HOH001 through HOH050.
+
+Reject registration without a buyer name or phone number.
+
+Reject entry when the buyer record is empty, the ticket is cancelled, or Entered is already true.
+
+Use a write lock for upsert and markEntered operations.
+
+Return the stored record after every write so the client displays server truth.
+
+Interface and theme
+
+Visual direction
+
+The interface should resemble a modern theatre box office rather than a generic admin dashboard. Burgundy provides the main brand surface, gold identifies key HOH elements, and warm neutral backgrounds keep forms readable. Ticket edge details may be used sparingly around registration panels.
+
+Token
+
+Value
+
+Use
+
+Primary burgundy
+
+#541D2B
+
+Header, primary buttons, active navigation, and brand mark
+
+Accent gold
+
+#E0A526
+
+Small labels, icons, focus accents, and selected highlights
+
+Warm background
+
+#F6F0EC
+
+Page background
+
+White
+
+#FFFFFF
+
+Forms, tables, and working surfaces
+
+Success green
+
+#17623B
+
+Valid ticket and successful entry
+
+Warning amber
+
+#8B5C0B
+
+Pending payment and unregistered ticket
+
+Error red
+
+#B4232F
+
+Invalid ticket, duplicate entry, and failed sync
+
+Body text
+
+#241D1B
+
+Primary text
+
+Muted text
+
+#6D625E
+
+Secondary labels and metadata
+
+Typography and spacing
+
+Use Arial, Inter, or another highly readable sans serif family available in the target environment.
+
+Use at least 16 px for body text and 14 px for frequently used labels.
+
+Use a compact 8 px spacing system with touch targets at least 44 px high.
+
+Use rounded panels and controls consistently. Avoid excessive shadows and decorative gradients.
+
+Status language
+
+State
+
+Label
+
+Visual treatment
+
+Action
+
+Unknown code
+
+Invalid Ticket
+
+Red
+
+Return to scan or manual entry
+
+Valid code without buyer
+
+Not Registered
+
+Amber
+
+Send to registration desk
+
+Registered and unused
+
+Valid Ticket
+
+Green
+
+Show Mark as Entered
+
+Already used
+
+Already Entered
+
+Red
+
+Block entry and show first entry time
+
+Connection unavailable
+
+Device Mode or Sync Failed
+
+Neutral or amber
+
+Do not imply the Sheet was updated
+
+Screen requirements
+
+Screen
+
+Required content
+
+Primary action
+
+Buyer Registration
+
+Ticket selector, buyer details, guest count, payment, amount, notes, connection state
+
+Save buyer details
+
+Check Entry
+
+QR scanner, manual code field, ticket result, buyer details, entry time
+
+Mark as Entered
+
+Ticket Register
+
+Summary counts, search, 50 ticket rows, payment and entry badges
+
+Open selected ticket
+
+Connection Settings
+
+Apps Script URL, connection test, status, setup instructions
+
+Connect Google Sheet
+
+Responsive behavior
+
+Desktop screens may place forms and status panels side by side.
+
+Mobile screens stack content in one column and keep the main action visible without horizontal scrolling.
+
+The ticket table becomes horizontally scrollable only when columns cannot be reduced safely.
+
+The QR camera uses the rear camera when supported and provides a manual entry fallback.
+
+Navigation labels remain understandable when icons are hidden or unavailable.
+
+Accessibility
+
+All inputs have visible labels and clear error text.
+
+Color never carries status alone. Every state includes a text label and appropriate icon.
+
+Keyboard users can complete registration, ticket lookup, and entry marking.
+
+Focus indicators remain visible against burgundy, gold, white, and warm neutral surfaces.
+
+Status updates use an accessible live region so screen readers announce success and failure.
+
+Security and privacy
+
+Risk
+
+Requirement
+
+Unauthorized staff access
+
+Keep the portal private or require staff authentication before production use.
+
+Exposed Apps Script URL
+
+Do not place administrative secrets in client code. Restrict deployment access where practical.
+
+Duplicate entry race
+
+Acquire a server side lock and recheck Entered before writing.
+
+Input tampering
+
+Repeat all code, field, and permission validation in Apps Script.
+
+Personal data exposure
+
+Collect only operational buyer data and limit Sheet sharing to the HOH team.
+
+Accidental edits
+
+Protect the code and entry columns in the Sheet or limit manual editing to administrators.
+
+Audit gaps
+
+Store update timestamps and staff identity when authentication is available.
+
+Data retention
+
+HOH should define how long buyer contact data is required after the event. The administrator should archive attendance totals, then remove or anonymize phone and email fields when they are no longer needed. The application must not reuse buyer details for marketing without the required consent.
+
+Failure behavior
+
+Never show a successful save before the Google Sheet confirms the write.
+
+When a lookup fails because the network is unavailable, show Sync Failed rather than Invalid Ticket.
+
+If the camera cannot open, keep manual ticket entry available.
+
+If the Sheet schema is incorrect, block writes and tell the administrator which required column is missing.
+
+Log technical details for administrators while showing concise staff-facing messages.
+
+Nonfunctional requirements
+
+Category
+
+Requirement
+
+Launch target
+
+Performance
+
+Ticket lookup response under normal venue connectivity
+
+95 percent within 3 seconds
+
+Entry speed
+
+Scan to final status
+
+Within 5 seconds
+
+Reliability
+
+No duplicate successful entry for one code
+
+Zero duplicate admissions
+
+Capacity
+
+Concurrent staff devices
+
+At least 10
+
+Compatibility
+
+Supported browsers
+
+Current Chrome, Safari, and Edge
+
+Responsiveness
+
+Mobile viewport
+
+Usable from 360 px width
+
+Availability
+
+Portal during event operating hours
+
+99.5 percent target
+
+Recoverability
+
+Sheet remains readable if the portal is unavailable
+
+Manual fallback available
+
+Observability
+
+Record action type, ticket code, timestamp, result, and staff identity for entry attempts.
+
+Track failed Google Sheet requests separately from invalid ticket scans.
+
+Provide simple counts for registrations, entries, invalid scans, and duplicate attempts.
+
+Do not store full buyer contact details in technical logs.
+
+Testing plan
+
+Test area
+
+Required cases
+
+Code validation
+
+HOH001, HOH050, lowercase input, surrounding spaces, HOH000, HOH051, blank, and unrelated QR payload
+
+Registration
+
+New record, update existing record, missing name, missing phone, invalid guest count, payment states, and special characters
+
+Entry
+
+Valid unused ticket, unregistered ticket, invalid ticket, cancelled ticket, already entered ticket, and two simultaneous entry attempts
+
+Google Sheet
+
+Missing Sheet, wrong headers, read failure, write failure, lock timeout, and malformed response
+
+QR camera
+
+Permission allowed, permission denied, unsupported browser, blurred code, and manual fallback
+
+Responsive layout
+
+360 px mobile, tablet portrait, desktop, enlarged text, and long buyer names
+
+Accessibility
+
+Keyboard flow, labels, focus visibility, live status messages, and noncolor status cues
+
+Critical acceptance tests
+
+1. Register HOH001 for a buyer and confirm the same data appears in the Google Sheet.
+
+2. Scan HOH001 and confirm the interface shows the buyer and Valid Ticket.
+
+3. Mark HOH001 as Entered and confirm the Sheet stores true plus an entry timestamp.
+
+4. Scan HOH001 again from another device and confirm the system shows Already Entered without changing the first timestamp.
+
+5. Scan HOH051 and confirm the system shows Invalid Ticket and performs no write.
+
+6. Disable connectivity during lookup and confirm the system shows Sync Failed rather than Invalid Ticket.
+
+Implementation plan
+
+Phase
+
+Development scope
+
+Completion evidence
+
+1 Foundation
+
+Project setup, HOH theme tokens, shared types, ticket code rules, and responsive application shell
+
+Application builds and displays all three work areas
+
+2 Google Sheet backend
+
+Sheet initialization, list, lookup, upsert, markEntered, locks, and error responses
+
+API tests pass with HOH001 and HOH050
+
+3 Buyer registration
+
+Registration form, validation, success and failure states, and record updates
+
+Buyer data persists and reloads from the Sheet
+
+4 Entry verification
+
+Manual lookup, camera QR scan, ticket status, atomic entry, and duplicate blocking
+
+Concurrent duplicate test admits only one request
+
+5 Administration
+
+Summary counts, ticket list, search, filters, and connection settings
+
+Counts and rows match the Sheet
+
+6 Hardening
+
+Authentication, permissions, accessibility, error handling, logging, and device testing
+
+Launch checklist approved
+
+7 Deployment
+
+Production configuration, staff training, dry run, and fallback procedure
+
+Production URL and operating guide delivered
+
+Developer deliverables
+
+Production web application source code and deployment configuration
+
+Google Apps Script source and Sheet setup instructions
+
+Environment configuration example without secrets
+
+Automated tests for ticket rules and entry locking
+
+Administrator setup guide and venue staff quick guide
+
+Deployment link and rollback procedure
+
+Definition of done
+
+All functional requirements in this PRD pass acceptance testing.
+
+HOH001 through HOH050 can be registered, found, and marked Entered correctly.
+
+A duplicate scan cannot create a second successful entry.
+
+The interface is usable on current Android and iPhone browsers.
+
+The Google Sheet, Apps Script, and website are owned by the HOH account or approved administrator.
+
+Staff receive a short operating guide and complete one venue dry run before the event.
+
+Launch checklist
+
+Status
+
+Launch item
+
+Owner
+
+Open
+
+Confirm the exact decoded payload for every existing QR code
+
+HOH operations
+
+Open
+
+Confirm whether one ticket may cover more than one guest
+
+HOH operations
+
+Open
+
+Approve payment and cancellation statuses
+
+HOH administration
+
+Open
+
+Create and share the production Google Sheet with approved staff
+
+HOH administration
+
+Open
+
+Deploy Apps Script and test list, lookup, save, and entry actions
+
+Developer
+
+Open
+
+Configure private site access or staff authentication
+
+Developer and administrator
+
+Open
+
+Run the simultaneous duplicate entry test
+
+Developer
+
+Open
+
+Test camera scanning on venue phones and network
+
+Entry team
+
+Open
+
+Prepare a manual Sheet fallback for venue use
+
+HOH operations
+
+Open
+
+Complete a full dry run before doors open
+
+All staff
+
+Product approval
+
+Development may begin after HOH confirms the QR payload format, booking capacity per ticket, final payment states, and the staff access model. These choices affect validation, Sheet columns, and the entry workflow.
