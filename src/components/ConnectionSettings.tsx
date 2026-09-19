@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  Settings, CheckCircle2, AlertCircle, RefreshCw, Copy, Check, 
+  CheckCircle2, AlertCircle, RefreshCw, Copy, Check,
   ExternalLink, Database, Server, Zap, Table 
 } from 'lucide-react';
 import { ConnectionMode } from '../types/ticket';
-import { getStoredScriptUrl, setStoredScriptUrl, sheetClient } from '../lib/sheetClient';
+import { getStoredScriptUrl, sheetClient } from '../lib/sheetClient';
 
 const TARGET_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1nJAMZQnqbsyciIHz-x4xaRiNzgcRPK861ae1No-tBGI/edit?usp=sharing';
 const TARGET_SHEET_ID = '1nJAMZQnqbsyciIHz-x4xaRiNzgcRPK861ae1No-tBGI';

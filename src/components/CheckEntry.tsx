@@ -11,9 +11,7 @@ import {
   evaluateTicketStatus,
   formatCurrency,
   formatLocalTimestamp,
-  isValidTicketCode,
-  normalizeTicketCode,
-  VALID_TICKET_CODES
+  normalizeTicketCode
 } from '../lib/ticketRules';
 import { PaymentBadge, TicketStatusBanner } from './StatusBadge';
 
@@ -21,14 +19,14 @@ interface CheckEntryProps {
   tickets: Record<string, TicketRecord>;
   onMarkEntered: (code: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
   onNavigateToRegistration: (code: string) => void;
-  staffRole: string;
+  staffRole?: string;
 }
 
 export const CheckEntry: React.FC<CheckEntryProps> = ({
   tickets,
   onMarkEntered,
   onNavigateToRegistration,
-  staffRole
+  staffRole: _staffRole
 }) => {
   const [inputCode, setInputCode] = useState<string>('');
   const [activeCode, setActiveCode] = useState<string>('');

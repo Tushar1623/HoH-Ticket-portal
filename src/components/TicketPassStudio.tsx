@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import QRCode from 'qrcode';
 import { 
-  Printer, Download, Eye, Sparkles, User, Users, Calendar, 
-  MapPin, IndianRupee, ShieldCheck, QrCode, ArrowRight, Check 
+  Printer, Download, Users, QrCode, ArrowRight, ShieldCheck
 } from 'lucide-react';
 import { TicketRecord } from '../types/ticket';
 import { VALID_TICKET_CODES, formatCurrency } from '../lib/ticketRules';
@@ -21,7 +20,6 @@ export const TicketPassStudio: React.FC<TicketPassStudioProps> = ({
 }) => {
   const [selectedCode, setSelectedCode] = useState<string>('HOH001');
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
-  const [printMode, setPrintMode] = useState<'single' | 'all'>('single');
   const printRef = useRef<HTMLDivElement>(null);
 
   const ticket = tickets[selectedCode];

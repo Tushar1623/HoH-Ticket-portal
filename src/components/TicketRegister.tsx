@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { 
-  Search, Download, ExternalLink, Edit3, CheckCircle, Clock, 
+  Search, Download, Edit3, CheckCircle, Clock,
   Users, IndianRupee, ShieldCheck, Ticket, Filter, RefreshCw 
 } from 'lucide-react';
 import { TicketRecord } from '../types/ticket';
