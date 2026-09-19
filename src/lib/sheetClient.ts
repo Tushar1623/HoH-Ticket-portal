@@ -1,8 +1,9 @@
 import { ApiResponse, ConnectionMode, SummaryCounts, TicketRecord } from '../types/ticket';
-import { isValidTicketCode, normalizeTicketCode, VALID_TICKET_CODES } from './ticketRules';
+import { isValidTicketCode, normalizePaymentStatus, normalizeTicketCode, VALID_TICKET_CODES } from './ticketRules';
 
 const LOCAL_STORAGE_KEY = 'hoh_tickets_db';
 const SCRIPT_URL_KEY = 'hoh_apps_script_url';
+export const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbz0H1B4qNI_FTEeZoMnQVp8tizk6Ar_5KrWS7Mk-lykd9aEQIhLrJJWBx6dK_Z_F3zB/exec';
 
 /**
  * Creates empty initial 50 tickets HOH001 through HOH050
@@ -14,6 +15,7 @@ export function createDefaultTickets(): Record<string, TicketRecord> {
   VALID_TICKET_CODES.forEach(code => {
     map[code] = {
       code,
+      qrPayload: code,
       buyerName: '',
       phone: '',
       email: '',
@@ -30,10 +32,26 @@ export function createDefaultTickets(): Record<string, TicketRecord> {
 }
 
 /**
- * Gets configured Apps Script Web App URL from localStorage
+ * Gets configured Apps Script Web App URL from localStorage or default deployment
  */
 export function getStoredScriptUrl(): string {
-  return localStorage.getItem(SCRIPT_URL_KEY) || '';
+  try {
+    const stored = localStorage.getItem(SCRIPT_URL_KEY);
+    if (stored && stored.includes('AKfycbz0H1B4qNI_FTEeZoMnQVp8tizk6Ar_5KrWS7Mk-lykd9aEQIhLrJJWBx6dK_Z_F3zB')) {
+      return stored;
+    }
+    // Clean up broken/outdated deployment URLs if they exist in localStorage
+    if (stored && (stored.includes('AKfycbzKc6Z3JTJkIqBxYbck') || stored.includes('AKfycbzjqQu3wSA8sMkYB4oxbByHyLi'))) {
+      localStorage.setItem(SCRIPT_URL_KEY, DEFAULT_SCRIPT_URL);
+      return DEFAULT_SCRIPT_URL;
+    }
+    if (stored && stored.trim()) {
+      return stored;
+    }
+  } catch (e) {
+    console.error('Error reading stored script URL:', e);
+  }
+  return DEFAULT_SCRIPT_URL;
 }
 
 /**
@@ -141,7 +159,7 @@ export class SheetClient {
   }
 
   /**
-   * Health check / Connection test
+   * Health check / Connection test (Section 11, 17)
    */
   public async testConnection(url?: string): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
     const targetUrl = url || this.scriptUrl;
@@ -154,24 +172,46 @@ export class SheetClient {
       const pingUrl = `${targetUrl}${targetUrl.includes('?') ? '&' : '?'}action=health&_t=${Date.now()}`;
       const res = await fetch(pingUrl, {
         method: 'GET',
-        headers: { 'Accept': 'application/json' }
+        redirect: 'follow'
       });
       const latencyMs = Math.round(performance.now() - start);
 
-      if (!res.ok) {
-        return { ok: false, latencyMs, error: `HTTP ${res.status}: ${res.statusText}` };
+      const text = await res.text();
+      let json: Record<string, unknown> | null = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        if (text.includes('accounts.google.com') || text.includes('ServiceLogin') || text.includes('authorization')) {
+          return {
+            ok: false,
+            latencyMs,
+            error: 'Authorization Required: The Apps Script needs permission to run. In Google Apps Script, select "initSheet" from the toolbar and click "▶ Run" once to authorize it.'
+          };
+        }
+        return {
+          ok: false,
+          latencyMs,
+          error: `Unexpected response from Google (HTTP ${res.status}): ${text.slice(0, 150)}`
+        };
       }
 
-      const json = await res.json();
       if (json && json.ok) {
         return { ok: true, latencyMs };
       } else {
-        return { ok: false, latencyMs, error: json.error || 'Invalid API response format' };
+        return {
+          ok: false,
+          latencyMs,
+          error: String(json?.error || 'Google Sheet returned ok=false')
+        };
       }
     } catch (err: unknown) {
       const latencyMs = Math.round(performance.now() - start);
       const errMsg = err instanceof Error ? err.message : String(err);
-      return { ok: false, latencyMs, error: `Connection failed: ${errMsg}` };
+      return {
+        ok: false,
+        latencyMs,
+        error: `Sync Failed (${errMsg}). Please check internet connectivity and ensure "Anyone" access is deployed.`
+      };
     }
   }
 
@@ -186,45 +226,46 @@ export class SheetClient {
         if (res.ok) {
           const json = await res.json();
           if (json && json.ok && json.data) {
-            // Update local backup
             saveLocalTickets(json.data);
             return { ok: true, data: json.data };
           }
         }
       } catch (err) {
-        console.warn('Google Sheet fetch failed, falling back to local store:', err);
+        console.warn('Google Sheet fetch failed, using local store:', err);
       }
     }
 
-    // Local Storage fallback
     const localData = getLocalTickets();
     return { ok: true, data: localData };
   }
 
   /**
-   * Lookup single ticket by code
+   * Lookup single ticket by code (Section 11)
    */
   public async lookupTicket(code: string): Promise<ApiResponse<TicketRecord>> {
     const normalized = normalizeTicketCode(code);
     if (!isValidTicketCode(normalized)) {
-      return { ok: false, error: `Invalid ticket code '${normalized}'. Range is HOH001-HOH050.` };
+      return { ok: false, error: 'Invalid Ticket. Code outside approved range HOH001-HOH050.' };
     }
 
     if (this.scriptUrl) {
       try {
         const res = await fetch(this.scriptUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // Apps Script preferred
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({ action: 'lookup', code: normalized })
         });
         if (res.ok) {
           const json = await res.json();
-          if (json && json.ok && json.data) {
-            return { ok: true, data: json.data };
+          const ticketData = json.ticket || json.data;
+          if (json && json.ok && ticketData) {
+            return { ok: true, data: ticketData };
+          } else if (json && json.error) {
+            return { ok: false, error: json.error };
           }
         }
-      } catch (err) {
-        console.warn('Google Sheet lookup failed, checking local store:', err);
+      } catch {
+        console.warn('Sheet lookup failed, checking local store.');
       }
     }
 
@@ -238,18 +279,21 @@ export class SheetClient {
   }
 
   /**
-   * Register or update buyer details (FR 01 - FR 05)
+   * Register or update buyer details (Section 6, 7, 8, 9, 10, 11, 12, 18)
    */
   public async upsertBuyer(record: Partial<TicketRecord> & { code: string }): Promise<ApiResponse<TicketRecord>> {
     const normalized = normalizeTicketCode(record.code);
     if (!isValidTicketCode(normalized)) {
-      return { ok: false, error: `Invalid code ${record.code}. Range is HOH001 to HOH050.` };
+      return { ok: false, error: 'Invalid Ticket. Range must be HOH001 to HOH050.' };
     }
 
+    const normalizedPayment = normalizePaymentStatus(record.paymentStatus);
     const now = new Date().toISOString();
+
     const localData = getLocalTickets();
     const existing = localData[normalized] || {
       code: normalized,
+      qrPayload: normalized,
       buyerName: '',
       phone: '',
       guests: 1,
@@ -258,65 +302,94 @@ export class SheetClient {
       updatedAt: now
     };
 
-    const updatedRecord: TicketRecord = {
-      ...existing,
-      ...record,
+    const isUpdate = Boolean(existing.buyerName && existing.buyerName.trim() !== '');
+
+    // Data contract object (Section 6)
+    const payload = {
+      action: 'upsert',
       code: normalized,
-      registeredAt: existing.registeredAt || now,
-      updatedAt: now,
+      qrPayload: record.qrPayload || normalized,
+      buyerName: (record.buyerName || '').trim(),
+      phone: String(record.phone || '').trim(),
+      email: (record.email || '').trim(),
+      guests: Number(record.guests || 1),
+      paymentStatus: normalizedPayment,
+      amount: Number(record.amount || 0),
+      notes: (record.notes || '').trim(),
       updatedBy: record.updatedBy || 'Staff'
     };
 
-    // If online with Sheet
+    // If connected to Google Sheet
     if (this.scriptUrl) {
       try {
         const res = await fetch(this.scriptUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({
-            action: 'upsert',
-            record: updatedRecord
-          })
+          body: JSON.stringify(payload)
         });
 
-        if (res.ok) {
-          const json = await res.json();
-          if (json && json.ok && json.data) {
-            localData[normalized] = json.data;
-            saveLocalTickets(localData);
-            return { ok: true, data: json.data, message: 'Saved to Google Sheet successfully!' };
-          } else {
-            return { ok: false, error: json.error || 'Failed saving to Sheet' };
-          }
+        if (!res.ok) {
+          return { ok: false, error: 'Sync Failed. Please check your connection.' };
         }
-      } catch (err: unknown) {
-        console.warn('Sheet upsert failed, saving to local device:', err);
+
+        const json = await res.json();
+        const savedTicket = json.ticket || json.data;
+
+        if (json && json.ok && savedTicket) {
+          localData[normalized] = savedTicket;
+          saveLocalTickets(localData);
+          return {
+            ok: true,
+            data: savedTicket,
+            message: json.message || (isUpdate ? 'Record updated successfully.' : 'Ticket registered successfully.')
+          };
+        } else {
+          return {
+            ok: false,
+            error: json.error || 'Google Sheet configuration error. Required column is missing.'
+          };
+        }
+      } catch {
+        return {
+          ok: false,
+          error: 'Sync Failed. Please check your connection.'
+        };
       }
     }
 
-    // Save locally
+    // Local Storage fallback when in Device Mode
+    const updatedRecord: TicketRecord = {
+      ...existing,
+      ...record,
+      code: normalized,
+      qrPayload: payload.qrPayload,
+      paymentStatus: normalizedPayment,
+      registeredAt: existing.registeredAt || now,
+      updatedAt: now,
+      updatedBy: payload.updatedBy
+    };
+
     localData[normalized] = updatedRecord;
     saveLocalTickets(localData);
-    return { 
-      ok: true, 
-      data: updatedRecord, 
-      message: this.scriptUrl ? 'Sheet offline. Saved to Device Storage.' : 'Saved to Device Storage.' 
+
+    return {
+      ok: true,
+      data: updatedRecord,
+      message: isUpdate ? 'Record updated successfully (Device Storage).' : 'Ticket registered successfully (Device Storage).'
     };
   }
 
   /**
-   * Mark ticket as Entered (FR 10, FR 11, BR 05, BR 06)
-   * Prevents duplicate admissions atomically
+   * Mark ticket as Entered (Section 15, 16)
    */
-  public async markEntered(code: string, staffRole: string = 'Entry Staff'): Promise<ApiResponse<TicketRecord>> {
+  public async markEntered(code: string, staffRole: string = 'Gate Staff'): Promise<ApiResponse<TicketRecord>> {
     const normalized = normalizeTicketCode(code);
     if (!isValidTicketCode(normalized)) {
-      return { ok: false, error: 'Invalid ticket code' };
+      return { ok: false, error: 'Invalid Ticket. Code outside approved range.' };
     }
 
     const now = new Date().toISOString();
 
-    // Check remote Google Sheet if connected
     if (this.scriptUrl) {
       try {
         const res = await fetch(this.scriptUrl, {
@@ -325,26 +398,27 @@ export class SheetClient {
           body: JSON.stringify({
             action: 'markEntered',
             code: normalized,
-            staffId: staffRole,
-            timestamp: now
+            staffId: staffRole
           })
         });
 
-        if (res.ok) {
-          const json = await res.json();
-          if (json && json.ok && json.data) {
-            // Update local cache
-            const localData = getLocalTickets();
-            localData[normalized] = json.data;
-            saveLocalTickets(localData);
-            return { ok: true, data: json.data, message: 'Ticket marked Entered successfully!' };
-          } else {
-            // Server error / already entered on sheet
-            return { ok: false, error: json.error || 'Failed to mark entered on Sheet' };
-          }
+        if (!res.ok) {
+          return { ok: false, error: 'Sync Failed. Please check your connection.' };
         }
-      } catch (err) {
-        console.warn('Network error marking entered on Sheet, falling back to local:', err);
+
+        const json = await res.json();
+        const ticketData = json.ticket || json.data;
+
+        if (json && json.ok && ticketData) {
+          const localData = getLocalTickets();
+          localData[normalized] = ticketData;
+          saveLocalTickets(localData);
+          return { ok: true, data: ticketData, message: json.message || 'Admission confirmed! Marked Entered.' };
+        } else {
+          return { ok: false, error: json.error || 'Failed to mark ticket entered.' };
+        }
+      } catch {
+        return { ok: false, error: 'Sync Failed. Please check your connection.' };
       }
     }
 
@@ -361,13 +435,12 @@ export class SheetClient {
     }
 
     if (existing.entered) {
-      return { 
-        ok: false, 
-        error: `Already Entered at ${existing.enteredAt || 'earlier session'}. Duplicate entry blocked!` 
+      return {
+        ok: false,
+        error: `Already Entered at ${existing.enteredAt || 'earlier session'}. Duplicate admission blocked!`
       };
     }
 
-    // Mark entered
     existing.entered = true;
     existing.enteredAt = now;
     existing.updatedAt = now;
@@ -376,16 +449,13 @@ export class SheetClient {
     localData[normalized] = existing;
     saveLocalTickets(localData);
 
-    return { 
-      ok: true, 
-      data: existing, 
-      message: 'Admission confirmed! Marked Entered.' 
+    return {
+      ok: true,
+      data: existing,
+      message: 'Admission confirmed! Marked Entered.'
     };
   }
 
-  /**
-   * Reset local storage to initial clean 50 tickets
-   */
   public resetLocalDatabase(): Record<string, TicketRecord> {
     const clean = createDefaultTickets();
     saveLocalTickets(clean);

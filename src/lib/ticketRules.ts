@@ -114,3 +114,16 @@ export function validateBuyerForm(data: {
 
   return { valid: true };
 }
+
+/**
+ * Normalizes payment status string to standard enum values (PRD Section 7)
+ */
+export function normalizePaymentStatus(input: string | null | undefined): PaymentStatus {
+  if (!input) return 'Pending';
+  const clean = input.trim().toLowerCase();
+  if (clean.includes('paid')) return 'Paid';
+  if (clean.includes('comp')) return 'Complimentary';
+  if (clean.includes('refund')) return 'Refunded';
+  if (clean.includes('cancel')) return 'Cancelled';
+  return 'Pending';
+}

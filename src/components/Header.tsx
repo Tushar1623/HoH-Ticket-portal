@@ -1,13 +1,11 @@
 import React from 'react';
-import { QrCode, UserPlus, ClipboardList, Settings, Shield, Ticket } from 'lucide-react';
-import { ConnectionMode, StaffRole } from '../types/ticket';
+import { QrCode, UserPlus, ClipboardList, Settings, Ticket } from 'lucide-react';
+import { ConnectionMode } from '../types/ticket';
 
 interface HeaderProps {
   activeTab: 'entry' | 'registration' | 'register' | 'passes' | 'settings';
   setActiveTab: (tab: 'entry' | 'registration' | 'register' | 'passes' | 'settings') => void;
   connectionMode: ConnectionMode;
-  role: StaffRole;
-  setRole: (role: StaffRole) => void;
   summaryCounts: {
     total: number;
     registered: number;
@@ -19,8 +17,6 @@ export const Header: React.FC<HeaderProps> = ({
   activeTab,
   setActiveTab,
   connectionMode,
-  role,
-  setRole,
   summaryCounts
 }) => {
   return (
@@ -96,51 +92,6 @@ export const Header: React.FC<HeaderProps> = ({
                 {connectionMode === 'connected' ? 'Sheet' : 'Device'}
               </span>
             </button>
-
-            {/* Role Switcher */}
-            <div className="relative flex items-center">
-              <div className="flex items-center gap-1 bg-black/50 p-1 rounded-xl border border-hoh-gold/30 text-xs">
-                <span className="text-hoh-gold/80 px-1 hidden xl:flex items-center gap-1">
-                  <Shield className="w-3 h-3" /> Role:
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setRole('entry')}
-                  className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
-                    role === 'entry'
-                      ? 'bg-hoh-gold text-stone-950 font-bold shadow-sm'
-                      : 'text-stone-300 hover:text-white'
-                  }`}
-                  title="Gate Entry Team"
-                >
-                  Entry
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRole('sales')}
-                  className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
-                    role === 'sales'
-                      ? 'bg-hoh-gold text-stone-950 font-bold shadow-sm'
-                      : 'text-stone-300 hover:text-white'
-                  }`}
-                  title="Sales & Buyer Registration"
-                >
-                  Sales
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRole('admin')}
-                  className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
-                    role === 'admin'
-                      ? 'bg-hoh-gold text-stone-950 font-bold shadow-sm'
-                      : 'text-stone-300 hover:text-white'
-                  }`}
-                  title="Box Office Admin"
-                >
-                  Admin
-                </button>
-              </div>
-            </div>
           </div>
         </div>
 

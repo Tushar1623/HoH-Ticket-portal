@@ -4,6 +4,7 @@ import {
   isValidTicketCode, 
   evaluateTicketStatus, 
   validateBuyerForm,
+  normalizePaymentStatus,
   VALID_TICKET_CODES 
 } from '../lib/ticketRules';
 import { TicketRecord } from '../types/ticket';
@@ -37,7 +38,6 @@ describe('Ticket Code Validation & Normalization (BR 01, BR 02)', () => {
     expect(isValidTicketCode('BMS12345')).toBe(false);
   });
 });
-
 describe('Buyer Registration Validation (FR 01 - FR 04, BR 08)', () => {
   it('should accept valid buyer data', () => {
     const res = validateBuyerForm({
@@ -183,5 +183,56 @@ describe('Atomic Duplicate Entry Prevention (FR 10, FR 11, BR 05, BR 06)', () =>
     expect(secondScanStatus).toBe('ALREADY_ENTERED');
     // Timestamp must NOT change (BR 05)
     expect(ticket.enteredAt).toBe(firstEntryTime);
+  });
+});
+
+describe('Google Sheets Storage Fix PRD Requirements', () => {
+  it('should normalize user-friendly payment labels to standard values (TEST 4)', () => {
+    expect(normalizePaymentStatus('Paid (Full Payment)')).toBe('Paid');
+    expect(normalizePaymentStatus('Pending Payment')).toBe('Pending');
+    expect(normalizePaymentStatus('Complimentary / VIP')).toBe('Complimentary');
+    expect(normalizePaymentStatus('Refunded')).toBe('Refunded');
+    expect(normalizePaymentStatus('Cancelled')).toBe('Cancelled');
+    expect(normalizePaymentStatus('')).toBe('Pending');
+    expect(normalizePaymentStatus(undefined)).toBe('Pending');
+  });
+
+  it('should preserve Entered and Entered At when buyer details are updated (TEST 6)', () => {
+    const enteredTicket: TicketRecord = {
+      code: 'HOH001',
+      buyerName: 'Old Name',
+      phone: '9000000000',
+      guests: 1,
+      paymentStatus: 'Pending',
+      amount: 0,
+      entered: true,
+      enteredAt: '2026-09-19T14:30:00.000Z',
+      registeredAt: '2026-09-19T10:00:00.000Z',
+      updatedAt: '2026-09-19T10:00:00.000Z'
+    };
+
+    // Update buyer details to Tushar Shaw
+    const updatedBuyer = {
+      buyerName: 'Tushar Shaw',
+      phone: '9163220111',
+      amount: 500,
+      paymentStatus: normalizePaymentStatus('Paid')
+    };
+
+    const resultRecord: TicketRecord = {
+      ...enteredTicket,
+      ...updatedBuyer,
+      // Must preserve:
+      entered: enteredTicket.entered,
+      enteredAt: enteredTicket.enteredAt,
+      registeredAt: enteredTicket.registeredAt,
+      updatedAt: new Date().toISOString()
+    };
+
+    expect(resultRecord.buyerName).toBe('Tushar Shaw');
+    expect(resultRecord.amount).toBe(500);
+    expect(resultRecord.entered).toBe(true);
+    expect(resultRecord.enteredAt).toBe('2026-09-19T14:30:00.000Z');
+    expect(resultRecord.registeredAt).toBe('2026-09-19T10:00:00.000Z');
   });
 });

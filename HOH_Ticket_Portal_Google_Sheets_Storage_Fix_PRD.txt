@@ -1,0 +1,544 @@
+HOH TICKET PORTAL DATA STORAGE & GOOGLE SHEETS INTEGRATION FRONTEND +
+APPS SCRIPT FIX PRD
+
+Version: 1.0 Status: Ready for development
+
+1.  PURPOSE
+
+The existing HOH Ticket Portal frontend already contains the buyer
+registration form, ticket selector, payment fields, guest count, amount,
+notes, and update-record workflow.
+
+The current issue is that the form data is not being stored in Google
+Sheets in the required row-and-column structure.
+
+This PRD defines the exact changes required to make the existing
+frontend send structured ticket data to a Google Apps Script Web App and
+make the Apps Script correctly create/update the corresponding Google
+Sheet row.
+
+IMPORTANT: - Do NOT rebuild the frontend. - Do NOT introduce MongoDB,
+Firebase, or another database. - Google Sheets remains the operational
+data store. - Google Apps Script is the API/integration layer. - The
+existing UI/design should remain unchanged unless a small status/error
+message is required. - The solution must support both new ticket
+registration and updating an existing ticket. - One ticket code must
+correspond to one Sheet row.
+
+2.  CURRENT PROBLEM
+
+The frontend form produces structured information such as:
+
+Ticket Code: HOH001 Buyer Name: Tushar Shaw Phone: 9163220111 Email:
+godfatherbabaji12@gmail.com Guests: 1 Payment Status: Paid (Full
+Payment) Amount: 500 Operational Notes: user-entered notes
+
+However, this information is not currently being persisted into the
+Google Sheet in the correct columns.
+
+The interface can display an existing ticket such as:
+
+HOH001 - Registered (Tushar Shaw)
+
+and can show:
+
+Updating existing buyer record.
+
+When the user selects “Update Record”, the existing HOH001 row must be
+updated rather than creating a duplicate row.
+
+3.  SOURCE OF TRUTH
+
+Google Sheets is the source of truth for ticket records.
+
+Architecture:
+
+Existing React Frontend | | HTTPS JSON request v Google Apps Script Web
+App | | Read / find / update v Google Sheet
+
+The frontend must not directly manipulate Google Sheets.
+
+4.  GOOGLE SHEET STRUCTURE
+
+Create or validate a sheet named:
+
+Tickets
+
+The first row must contain these exact headers:
+
+Code QR Payload Buyer Name Phone Email Guests Payment Status Amount
+Notes Entered Entered At Registered At Updated At Updated By
+
+Recommended column order:
+
+A = Code B = QR Payload C = Buyer Name D = Phone E = Email F = Guests G
+= Payment Status H = Amount I = Notes J = Entered K = Entered At L =
+Registered At M = Updated At N = Updated By
+
+5.  DATA TYPE REQUIREMENTS
+
+Code: - Text - Required - Unique - Examples: HOH001, HOH002 - Must never
+be reassigned after entry
+
+QR Payload: - Text - Usually the same as Code - Store the decoded QR
+value when it differs from Code
+
+Buyer Name: - Text - Required for registration
+
+Phone: - Text - Required - Must remain text so leading zeros and country
+codes are preserved
+
+Email: - Text - Optional
+
+Guests: - Integer - Required - Valid range: 1 to 10 unless HOH changes
+the rule
+
+Payment Status: - Enum - Allowed values: Pending Paid Complimentary
+Refunded Cancelled
+
+Frontend display labels may be more descriptive, for example: “Paid
+(Full Payment)” but the stored normalized value should be: “Paid”
+
+Amount: - Number - Indian rupee amount - Optional
+
+Notes: - Text - Optional
+
+Entered: - Boolean - Default false
+
+Entered At: - Date/time - Server-generated when ticket is successfully
+marked entered
+
+Registered At: - Date/time - Set on first successful registration - Must
+not change when an existing ticket is updated
+
+Updated At: - Date/time - Updated on every successful record update
+
+Updated By: - Text - Staff identity when authentication is available
+
+6.  FRONTEND DATA CONTRACT
+
+When the user saves or updates a ticket, the frontend must create a
+normalized object.
+
+Example:
+
+{ “action”: “upsert”, “code”: “HOH001”, “qrPayload”: “HOH001”,
+“buyerName”: “Tushar Shaw”, “phone”: “9163220111”, “email”:
+“godfatherbabaji12@gmail.com”, “guests”: 1, “paymentStatus”: “Paid”,
+“amount”: 500, “notes”: “” }
+
+The frontend must send the ticket code only as:
+
+“HOH001”
+
+It must NOT send the display string:
+
+“HOH001 - Registered (Tushar Shaw)”
+
+The display label is UI-only.
+
+7.  PAYMENT STATUS NORMALIZATION
+
+The frontend may display user-friendly labels but must normalize them
+before sending to Apps Script.
+
+Examples:
+
+“Paid (Full Payment)” -> “Paid” “Pending Payment” -> “Pending”
+“Complimentary” -> “Complimentary” “Refunded” -> “Refunded” “Cancelled”
+-> “Cancelled”
+
+Apps Script must also validate and normalize these values server-side.
+
+8.  UPSERT BEHAVIOR
+
+The main operation is UPSERT.
+
+When the frontend sends:
+
+action = upsert code = HOH001
+
+Apps Script must:
+
+1.  Validate the request.
+
+2.  Normalize the code.
+
+3.  Validate that the code is HOH001 through HOH050.
+
+4.  Find the existing row by the Code column.
+
+5.  If the row exists, update that row.
+
+6.  If the row does not exist, create the correct ticket row only if the
+    ticket is valid and the system design permits initial row creation.
+
+7.  Never create duplicate rows for the same Code.
+
+8.  Preserve Entered and Entered At when updating buyer information.
+
+9.  Preserve Registered At after the first registration.
+
+10. Update Updated At.
+
+11. Update Updated By when available.
+
+12. Return the stored record to the frontend.
+
+13. EXISTING RECORD UPDATE
+
+Example existing Sheet row:
+
+HOH001 | HOH001 | Old Name | 9000000000 | old@email.com | 1 | Pending |
+0 | | FALSE | | 2026-09-19 10:00 | 2026-09-19 10:00 | Staff1
+
+User changes the form to:
+
+Buyer Name: Tushar Shaw Phone: 9163220111 Email:
+godfatherbabaji12@gmail.com Guests: 1 Payment Status: Paid Amount: 500
+
+The Sheet must become:
+
+HOH001 | HOH001 | Tushar Shaw | 9163220111 | godfatherbabaji12@gmail.com
+| 1 | Paid | 500 | | FALSE | | original registration time | new update
+time | current staff
+
+The system must NOT append another HOH001 row.
+
+10. NEW REGISTRATION
+
+If HOH002 is an available ticket and the user registers it:
+
+The system should create/populate the HOH002 record:
+
+Code = HOH002 QR Payload = HOH002 Buyer Name = submitted name Phone =
+submitted phone Email = submitted email Guests = submitted guest count
+Payment Status = normalized status Amount = submitted amount Notes =
+submitted notes Entered = FALSE Entered At = blank Registered At =
+current server time Updated At = current server time Updated By =
+current staff
+
+11. GOOGLE APPS SCRIPT API
+
+The Apps Script Web App must expose:
+
+GET: - health - list
+
+POST: - lookup - upsert - markEntered
+
+Expected actions:
+
+GET /exec action=list
+
+GET /exec action=health
+
+POST: { “action”: “lookup”, “code”: “HOH001” }
+
+POST: { “action”: “upsert”, “code”: “HOH001”, “qrPayload”: “HOH001”,
+“buyerName”: “Tushar Shaw”, “phone”: “9163220111”, “email”:
+“godfatherbabaji12@gmail.com”, “guests”: 1, “paymentStatus”: “Paid”,
+“amount”: 500, “notes”: “” }
+
+POST: { “action”: “markEntered”, “code”: “HOH001” }
+
+12. API RESPONSE
+
+Every response must contain an “ok” boolean.
+
+Successful upsert example:
+
+{ “ok”: true, “message”: “Ticket saved successfully”, “ticket”: {
+“code”: “HOH001”, “buyerName”: “Tushar Shaw”, “phone”: “9163220111”,
+“email”: “godfatherbabaji12@gmail.com”, “guests”: 1, “paymentStatus”:
+“Paid”, “amount”: 500, “entered”: false } }
+
+Failed response example:
+
+{ “ok”: false, “error”: “Buyer name and phone are required” }
+
+The frontend must display success only after receiving ok=true from Apps
+Script.
+
+13. COLUMN MAPPING
+
+Apps Script must map by header name rather than assuming fragile column
+positions.
+
+Required mapping:
+
+Code -> Code QR Payload -> QR Payload buyerName -> Buyer Name phone ->
+Phone email -> Email guests -> Guests paymentStatus -> Payment Status
+amount -> Amount notes -> Notes entered -> Entered enteredAt -> Entered
+At registeredAt -> Registered At updatedAt -> Updated At updatedBy ->
+Updated By
+
+The script should validate the header row before writing.
+
+If a required column is missing, writes must be blocked and the error
+returned to the frontend.
+
+14. DUPLICATE PREVENTION
+
+Code is the unique identifier.
+
+Before an upsert:
+
+1.  Normalize the submitted code.
+2.  Search the Code column.
+3.  Identify the existing row.
+4.  Update that row.
+
+Never identify the record using buyer name, phone number, email, or row
+number.
+
+Example:
+
+HOH001 must always resolve to the HOH001 row.
+
+15. LOCKING
+
+Apps Script must use a server-side lock for write operations.
+
+For upsert: - Acquire lock - Read current Sheet state - Find ticket
+row - Validate - Write - Flush changes - Return stored record - Release
+lock
+
+For markEntered: - Acquire lock - Read current Entered value - If true,
+reject as Already Entered - If false, set Entered=true - Set
+server-generated Entered At - Write - Return stored record - Release
+lock
+
+This is required so two phones cannot successfully admit the same ticket
+simultaneously.
+
+16. ENTERED DATA MUST NEVER BE LOST DURING BUYER UPDATE
+
+If a ticket is already entered:
+
+Entered = TRUE Entered At = existing timestamp
+
+and a staff member later updates buyer information, the update must NOT
+reset:
+
+Entered Entered At
+
+Example:
+
+Before update: Entered = TRUE Entered At = 2026-10-02 18:42:31
+
+After buyer update: Entered = TRUE Entered At = 2026-10-02 18:42:31
+
+17. FRONTEND CONNECTION SETTINGS
+
+The existing frontend should support a configurable Apps Script
+endpoint.
+
+Admin connection settings should contain:
+
+Apps Script Web App URL [ input ]
+
+[ Test Connection ] [ Save Connection ]
+
+Connection states:
+
+Sheet Connected Connecting Device Mode Sync Failed
+
+The frontend should never display a successful save unless Apps Script
+confirms the write.
+
+The connection URL may be stored in frontend configuration or admin
+configuration depending on the existing application architecture.
+
+18. FRONTEND ERROR HANDLING
+
+If Google Apps Script is unreachable:
+
+Show: “Sync Failed. Please check your connection.”
+
+Do NOT show: “Invalid Ticket”
+
+If the Sheet has incorrect headers:
+
+Show: “Google Sheet configuration error. Required column is missing.”
+
+If save succeeds:
+
+Show: “Record updated successfully.”
+
+If new registration succeeds:
+
+Show: “Ticket registered successfully.”
+
+19. TICKET SELECTOR
+
+The ticket selector may display:
+
+HOH001 - Registered (Tushar Shaw) HOH002 - Registered (Rahul Das)
+HOH003 - Available
+
+However, the underlying value must remain:
+
+HOH001 HOH002 HOH003
+
+Do not send the formatted display text to Apps Script.
+
+20. EXISTING FRONTEND REQUIREMENT
+
+Do not redesign or rebuild the existing Buyer Registration interface.
+
+Keep: - Ticket selector - Buyer name - Phone - Email - Guest counter -
+Payment status - Amount - Operational notes - Update Record button -
+Existing HOH visual styling
+
+Only modify: - Data preparation - API request - Response handling -
+Google Apps Script integration - Error/success states where necessary
+
+21. DATA FLOW
+
+User selects ticket | v Frontend loads ticket record | v User edits form
+| v Frontend normalizes values | v POST action=upsert | v Google Apps
+Script validates request | v Apps Script finds Code | +—- Existing row
+—-> Update row | +—- New valid ticket -> Populate ticket row | v Google
+Sheet | v Apps Script returns stored record | v Frontend refreshes from
+server response
+
+22. ACCEPTANCE TESTS
+
+TEST 1 - Existing ticket update
+
+Select: HOH001 - Registered (Tushar Shaw)
+
+Change amount to: 500
+
+Click: Update Record
+
+Expected: - Exactly one HOH001 row exists. - Amount column becomes
+500. - Buyer details remain correct. - Updated At changes. - Registered
+At remains unchanged. - Entered state remains unchanged. - Frontend
+receives ok=true.
+
+TEST 2 - New ticket
+
+Select: HOH002
+
+Enter buyer details.
+
+Save.
+
+Expected: - HOH002 contains the submitted buyer data. - Registered At is
+populated. - Updated At is populated. - Entered is FALSE.
+
+TEST 3 - Duplicate prevention
+
+Attempt to register/update HOH001 again.
+
+Expected: - Existing row is updated. - No second HOH001 row is created.
+
+TEST 4 - Payment normalization
+
+Frontend displays: Paid (Full Payment)
+
+Expected Sheet: Paid
+
+TEST 5 - Phone preservation
+
+Input: 09163220111
+
+Expected Sheet: 09163220111
+
+Phone must be stored as text.
+
+TEST 6 - Entry preservation
+
+Existing: Entered = TRUE Entered At = timestamp
+
+Update buyer details.
+
+Expected: Entered remains TRUE. Entered At remains the original
+timestamp.
+
+TEST 7 - Invalid code
+
+Send: HOH051
+
+Expected: - Request rejected. - No Sheet write. - Frontend displays
+Invalid Ticket.
+
+TEST 8 - Missing required fields
+
+Submit without buyer name or phone.
+
+Expected: - Request rejected. - No incomplete registration is written.
+
+TEST 9 - Simultaneous entry
+
+Two devices scan the same unused ticket simultaneously.
+
+Expected: - Only one request succeeds. - The other receives Already
+Entered. - The first Entered At timestamp is preserved.
+
+TEST 10 - Connection failure
+
+Disable internet.
+
+Expected: - Frontend shows Sync Failed. - Frontend does not claim the
+data was saved.
+
+23. DEVELOPER DELIVERABLES
+
+24. Updated existing React frontend integration.
+
+25. Google Apps Script source code.
+
+26. Google Sheet template with required headers.
+
+27. API configuration instructions.
+
+28. Connection Settings implementation.
+
+29. Validation and error handling.
+
+30. Duplicate-row prevention.
+
+31. Atomic entry locking.
+
+32. Test instructions.
+
+33. Deployment instructions.
+
+34. DEFINITION OF DONE
+
+The issue is considered solved when:
+
+-   The existing frontend can send form data to Apps Script.
+-   Apps Script correctly maps every field to the appropriate Google
+    Sheet column.
+-   HOH001 through HOH050 can be stored and retrieved.
+-   Existing tickets are updated instead of duplicated.
+-   Buyer data appears in the correct row and columns.
+-   Payment status is normalized.
+-   Phone numbers are preserved as text.
+-   Registered At is preserved during updates.
+-   Entered and Entered At are preserved during buyer updates.
+-   Entry operations are protected by a server-side lock.
+-   The frontend receives and displays the actual server result.
+-   Connection errors are correctly distinguished from invalid tickets.
+-   No new backend server or database is introduced.
+-   The existing frontend UI remains intact.
+
+25. FINAL IMPLEMENTATION PRINCIPLE
+
+The existing frontend is the user interface.
+
+Google Apps Script is the API/integration layer.
+
+Google Sheets is the data store.
+
+The frontend should send structured JSON.
+
+Apps Script should validate, find the correct ticket row by Code, update
+the appropriate columns, preserve protected fields, and return the
+stored record.
+
+The system must never rely on the frontend alone to guarantee data
+integrity.

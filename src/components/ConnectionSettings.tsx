@@ -33,14 +33,25 @@ export const ConnectionSettings: React.FC<ConnectionSettingsProps> = ({
     setTestResult(null);
 
     const cleanUrl = url.trim();
-    sheetClient.setScriptUrl(cleanUrl);
 
     if (!cleanUrl) {
+      sheetClient.setScriptUrl('');
       onConnectionChange('device');
       setTestResult({ ok: true, error: 'Switched to Device Mode (Local Storage).' });
       setTesting(false);
       return;
     }
+
+    if (cleanUrl.includes('docs.google.com/spreadsheets')) {
+      setTestResult({
+        ok: false,
+        error: 'You entered the Google Sheet URL instead of the Apps Script Web App URL. Please follow the steps below: Open Extensions > Apps Script > Deploy > New deployment > Web App, and copy the URL starting with https://script.google.com/macros/s/.../exec'
+      });
+      setTesting(false);
+      return;
+    }
+
+    sheetClient.setScriptUrl(cleanUrl);
 
     try {
       const res = await sheetClient.testConnection(cleanUrl);

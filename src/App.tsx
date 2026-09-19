@@ -94,8 +94,6 @@ export function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         connectionMode={connectionMode}
-        role={role}
-        setRole={setRole}
         summaryCounts={{
           total: summary.total,
           registered: summary.registered,
