@@ -1,20 +1,25 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 
-export type TicketDbStatus = 'available' | 'reserved' | 'active' | 'entered' | 'cancelled' | 'refunded';
+export type TicketStatus = 'available' | 'registered' | 'cancelled' | 'AVAILABLE' | 'REGISTERED';
 
 export interface ITicket extends Document {
   _id: Types.ObjectId;
   code: string;
   serialNumber: number;
-  qrPayload: string;
+  status: TicketStatus;
   bookingId: Types.ObjectId | null;
-  status: TicketDbStatus;
+  buyerName: string | null;
+  phone: string | null;
+  email: string | null;
   entered: boolean;
   enteredAt: Date | null;
   entryCount: number;
+  guestsAllowed: number;
+  registeredAt?: Date | null;
+  cancellationReason?: string | null;
+  qrPayload?: string;
   createdAt: Date;
   updatedAt: Date;
-  version: number;
 }
 
 const TicketSchema = new Schema<ITicket>(
@@ -35,10 +40,12 @@ const TicketSchema = new Schema<ITicket>(
       max: 50,
       index: true
     },
-    qrPayload: {
+    status: {
       type: String,
-      required: true,
-      trim: true
+      enum: ['available', 'registered', 'cancelled', 'AVAILABLE', 'REGISTERED'],
+      default: 'available',
+      index: true,
+      required: true
     },
     bookingId: {
       type: Schema.Types.ObjectId,
@@ -46,12 +53,20 @@ const TicketSchema = new Schema<ITicket>(
       default: null,
       index: true
     },
-    status: {
+    buyerName: {
       type: String,
-      enum: ['available', 'reserved', 'active', 'entered', 'cancelled', 'refunded'],
-      default: 'available',
-      index: true,
-      required: true
+      default: null,
+      trim: true
+    },
+    phone: {
+      type: String,
+      default: null,
+      trim: true
+    },
+    email: {
+      type: String,
+      default: null,
+      trim: true
     },
     entered: {
       type: Boolean,
@@ -68,9 +83,26 @@ const TicketSchema = new Schema<ITicket>(
       default: 0,
       min: 0
     },
-    version: {
+    guestsAllowed: {
       type: Number,
-      default: 1
+      default: 1,
+      min: 1
+    },
+    registeredAt: {
+      type: Date,
+      default: null
+    },
+    cancellationReason: {
+      type: String,
+      enum: ['LOST', 'DAMAGED', 'VOID', 'OTHER', null],
+      default: null
+    },
+    qrPayload: {
+      type: String,
+      trim: true,
+      default: function (this: any) {
+        return this.code;
+      }
     }
   },
   {
@@ -78,7 +110,5 @@ const TicketSchema = new Schema<ITicket>(
     versionKey: false
   }
 );
-
-
 
 export const Ticket = mongoose.model<ITicket>('Ticket', TicketSchema, 'tickets');

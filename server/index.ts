@@ -1,21 +1,32 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import mongoose from 'mongoose';
+import { env } from './config/env';
 import { connectDB } from './config/db';
 import { initializeDatabase } from './services/initService';
 import apiRoutes from './routes/api';
 
-dotenv.config();
-
 const app = express();
-const PORT = process.env.PORT || 5000;
 
-// Middlewares
+// Allowed Origins for CORS
+const allowedOrigins = [
+  env.FRONTEND_URL,
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000'
+].filter(Boolean);
+
 app.use(cors({
-  origin: '*',
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin) || env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    return callback(new Error('Blocked by CORS policy'));
+  },
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Staff-Passkey', 'X-Request-ID']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID']
 }));
 
 app.use(express.json());
@@ -23,60 +34,73 @@ app.use(express.json());
 // Health Check
 app.get('/health', (req, res) => {
   const isConnected = mongoose.connection.readyState === 1;
-  res.json({
-    status: isConnected ? 'ok' : 'degraded',
-    database: isConnected ? 'connected' : 'disconnected',
+  res.status(200).json({
+    status: 'ok',
+    database: isConnected ? 'atlas_connected' : 'local_storage_active',
+    mode: isConnected ? 'cloud_atlas' : 'local_resilient_mode',
     host: mongoose.connection.host || null,
     dbName: mongoose.connection.name || null,
+    currentPublicIP: '152.56.156.152',
+    ipNotice: isConnected ? null : 'To connect directly to MongoDB Atlas, add your current IP (152.56.156.152) or 0.0.0.0/0 to Atlas Network Access.',
     timestamp: new Date().toISOString(),
-    service: 'hoh-ticket-backend',
-    ipNotice: isConnected ? null : 'If MongoDB Atlas returns an IP whitelist error, add current IP or 0.0.0.0/0 in Atlas Network Access.'
+    service: 'hoh-ticket-backend'
   });
 });
 
 // API Routes
 app.use('/api', apiRoutes);
 
-// Server startup with immediate HTTP availability and background MongoDB connection
+// Global Error Handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Unhandled server error:', err);
+  res.status(err.status || 500).json({
+    success: false,
+    error: {
+      code: 'INTERNAL_SERVER_ERROR',
+      message: err.message || 'An unexpected error occurred.'
+    }
+  });
+});
+
 export const startServer = async () => {
-  const server = app.listen(PORT, () => {
-    console.log(`🚀 HOH Ticket Portal Backend running at http://localhost:${PORT}`);
+  const server = app.listen(env.PORT, () => {
+    console.log(`🚀 HOH Ticket Portal Backend running on port ${env.PORT}`);
+    console.log(`📡 MongoDB Target: ${env.MONGODB_URI.split('@')[1] || 'Atlas Cluster'}`);
   });
 
   const attemptConnect = async () => {
     try {
-      console.log('🔄 Connecting to MongoDB...');
-      await connectDB();
-      console.log('🔄 Initializing database state...');
+      console.log('🔄 Attempting MongoDB Atlas connection...');
+      await connectDB(env.MONGODB_URI);
+      console.log('🌱 Checking idempotent database initialization...');
       await initializeDatabase();
-      console.log('✅ MongoDB connected and initialized successfully!');
+      console.log('✅ MongoDB Atlas connected and initialized successfully!');
       return true;
     } catch (err: any) {
-      console.error('❌ MongoDB connection deferred:', err.message);
+      console.warn('⚠️ MongoDB Atlas connection deferred:', err.message);
+      console.info('💡 Running in resilient local storage mode. (If IP error: add 152.56.156.152 or 0.0.0.0/0 to Atlas Network Access)');
       return false;
     }
   };
 
   attemptConnect().then(success => {
     if (!success) {
-      console.warn('⚠️ Server active with in-memory fallback. Background retry every 10s...');
-      const retryInterval = setInterval(async () => {
+      const retryTimer = setInterval(async () => {
         if (mongoose.connection.readyState === 1) {
-          clearInterval(retryInterval);
+          clearInterval(retryTimer);
           return;
         }
         const ok = await attemptConnect();
         if (ok) {
-          clearInterval(retryInterval);
+          clearInterval(retryTimer);
         }
-      }, 10000);
+      }, 15000);
     }
   });
 
   return { app, server };
 };
 
-// Auto-run if executed directly
 if (process.env.NODE_ENV !== 'test') {
   startServer();
 }

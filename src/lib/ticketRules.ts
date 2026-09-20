@@ -159,7 +159,7 @@ export function canResetEvent(role: string): boolean {
   return role === 'admin';
 }
 
-export function canAccessSheetSetup(role: string): boolean {
+export function canAccessAdminSetup(role: string): boolean {
   return ['manager', 'admin'].includes(role);
 }
 

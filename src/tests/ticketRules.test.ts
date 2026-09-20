@@ -186,7 +186,7 @@ describe('Atomic Duplicate Entry Prevention (FR 10, FR 11, BR 05, BR 06)', () =>
   });
 });
 
-describe('Google Sheets Storage Fix PRD Requirements', () => {
+describe('Ticket Storage & Payment Normalization Requirements', () => {
   it('should normalize user-friendly payment labels to standard values (TEST 4)', () => {
     expect(normalizePaymentStatus('Paid (Full Payment)')).toBe('Paid');
     expect(normalizePaymentStatus('Pending Payment')).toBe('Pending');

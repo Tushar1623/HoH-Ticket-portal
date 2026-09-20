@@ -35,7 +35,7 @@ export type StaffRole = 'entry' | 'sales' | 'manager' | 'admin';
 export interface StaffSession {
   role: StaffRole;
   identity: string;
-  passkey: string;
+  passkey?: string;
 }
 
 export interface PrepareResetResult {

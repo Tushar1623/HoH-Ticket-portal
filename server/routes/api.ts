@@ -1,51 +1,71 @@
 import { Router } from 'express';
 import { login, getMe } from '../controllers/authController';
 import {
+  getDashboardStats,
   getTickets,
+  getTicketByCode,
+  markTicketEntered,
+  markTicketNotEntered,
+  setEntryStatus,
+  updateTicket,
   verifyTicket,
-  markEntered,
-  correctStatus,
-  clearTicket,
-  prepareEventReset,
-  confirmEventReset
+  cancelTicket,
+  uncancelTicket,
+  clearTicketBooking,
+  resetEvent
 } from '../controllers/ticketController';
 import {
   previewBooking,
+  previewSale,
   createBooking,
+  listBookings,
+  getBookingById,
+  updateBooking,
+  removeTicketFromBooking,
   clearBooking
 } from '../controllers/bookingController';
-import {
-  authenticate,
-  requireRole,
-  authLimiter,
-  entryLimiter,
-  apiLimiter,
-  requestIdMiddleware
-} from '../middleware/auth';
+import { authenticate, requestIdMiddleware } from '../middleware/auth';
 
 const router = Router();
 
-// Apply request ID middleware to all routes
+// Trace all incoming API requests
 router.use(requestIdMiddleware);
 
-// Auth routes
-router.post('/auth/login', authLimiter, login);
+// --- Public Auth Routes ---
+router.post('/auth/login', login);
 router.get('/auth/me', authenticate, getMe);
 
-// Ticket routes
-router.get('/tickets', getTickets);
-router.post('/tickets/verify', entryLimiter, verifyTicket);
-router.post('/tickets/mark-entered', entryLimiter, authenticate, requireRole(['entry', 'manager', 'admin']), markEntered);
-router.post('/tickets/correct-status', authenticate, requireRole(['manager', 'admin']), correctStatus);
-router.post('/tickets/clear', authenticate, requireRole(['manager', 'admin']), clearTicket);
+// --- Protected Dashboard ---
+router.get('/dashboard', authenticate, getDashboardStats);
 
-// Booking routes
-router.post('/bookings/preview', previewBooking);
-router.post('/bookings', apiLimiter, authenticate, requireRole(['sales', 'manager', 'admin']), createBooking);
-router.post('/bookings/clear', authenticate, requireRole(['manager', 'admin']), clearBooking);
+// --- Protected Ticket Routes ---
+router.get('/tickets', authenticate, getTickets);
+router.get('/tickets/:code', authenticate, getTicketByCode);
+router.post('/tickets/:code/preview-sale', authenticate, previewSale);
+router.put('/tickets/:code/entry', authenticate, markTicketEntered);
+router.put('/tickets/:code/not-entry', authenticate, markTicketNotEntered);
+router.put('/tickets/:code/cancel', authenticate, cancelTicket);
+router.put('/tickets/:code/uncancel', authenticate, uncancelTicket);
+router.put('/tickets/:code', authenticate, updateTicket);
+router.delete('/tickets/:code/booking', authenticate, clearTicketBooking);
 
-// Two-step Event Reset routes (Super Admin only)
-router.post('/event/prepare-reset', authenticate, requireRole(['admin']), prepareEventReset);
-router.post('/event/confirm-reset', authenticate, requireRole(['admin']), confirmEventReset);
+// Compatibility Ticket Routes
+router.post('/tickets/entry-status', authenticate, setEntryStatus);
+router.post('/tickets/update', authenticate, updateTicket);
+router.post('/tickets/clear', authenticate, clearTicketBooking);
+router.post('/tickets/verify', authenticate, verifyTicket);
+
+// --- Protected Booking Routes ---
+router.get('/bookings', authenticate, listBookings);
+router.get('/bookings/:id', authenticate, getBookingById);
+router.post('/bookings/preview', authenticate, previewBooking);
+router.post('/bookings', authenticate, createBooking);
+router.put('/bookings/:id', authenticate, updateBooking);
+router.delete('/bookings/:id/tickets/:code', authenticate, removeTicketFromBooking);
+router.post('/bookings/clear', authenticate, clearBooking);
+
+// --- Protected Event Reset ---
+router.post('/event/reset', authenticate, resetEvent);
+router.post('/event/clear', authenticate, resetEvent);
 
 export default router;

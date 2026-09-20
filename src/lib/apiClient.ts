@@ -1,216 +1,473 @@
-import { ApiResponse, PaymentStatus, StaffRole, StaffSession, SummaryCounts, TicketRecord } from '../types/ticket';
-import { VALID_TICKET_CODES, calculateConsecutiveSeats } from './ticketRules';
-
-const LOCAL_STORAGE_KEY = 'hoh_tickets_db';
-const STAFF_SESSION_KEY = 'hoh_staff_session';
-const JWT_TOKEN_KEY = 'hoh_jwt_token';
-
-export const DEFAULT_PASSKEYS: Record<StaffRole, string> = {
-  admin: 'hoh-admin-2025',
-  manager: 'hoh-mgr-2025',
-  sales: 'hoh-sales-2025',
-  entry: 'hoh-door-2025'
-};
-
-function generateRequestId(): string {
-  return `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+export interface TodaySales {
+  ticketsSold: number;
+  bookings: number;
+  revenue: number;
+  cash: number;
+  upi: number;
+  other: number;
+  pending: number;
 }
 
-export function createDefaultTickets(): Record<string, TicketRecord> {
-  const map: Record<string, TicketRecord> = {};
-  const now = new Date().toISOString();
-
-  VALID_TICKET_CODES.forEach((code, index) => {
-    map[code] = {
-      code,
-      qrPayload: `HOH-TICKET-${String(index + 1).padStart(3, '0')}`,
-      serialNumber: index + 1,
-      buyerName: '',
-      phone: '',
-      email: '',
-      guests: 1,
-      paymentStatus: 'Pending',
-      amount: 0,
-      notes: '',
-      status: 'available',
-      entered: false,
-      entryCount: 0,
-      updatedAt: now
-    };
-  });
-
-  return map;
+export interface DashboardStats {
+  totalTickets: number;
+  registered: number;
+  available: number;
+  entered: number;
+  notEntered: number;
+  cancelled?: number;
+  attendanceRate: number;
+  totalBookings?: number;
+  totalTicketsSold?: number;
+  totalRevenue?: number;
+  todaySales?: TodaySales;
 }
 
-export function getLocalTickets(): Record<string, TicketRecord> {
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) {
-      const initial = createDefaultTickets();
-      saveLocalTickets(initial);
-      return initial;
-    }
-    return JSON.parse(raw);
-  } catch {
-    return createDefaultTickets();
-  }
+export interface TicketItem {
+  _id: string;
+  code: string;
+  serialNumber: number;
+  status: 'available' | 'registered' | 'cancelled';
+  bookingId: string | null;
+  buyerName: string | null;
+  phone: string | null;
+  email: string | null;
+  entered: boolean;
+  enteredAt: string | null;
+  registeredAt?: string | null;
+  cancellationReason?: string | null;
+  bookingCode?: string;
+  paymentStatus?: string;
+  totalAmount?: number;
+  amountPaid?: number;
+  paymentMethod?: string;
+  updatedAt: string;
 }
 
-export function saveLocalTickets(tickets: Record<string, TicketRecord>): void {
-  try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(tickets));
-  } catch (e) {
-    console.error('Error saving local tickets:', e);
-  }
+export interface BookingItem {
+  _id: string;
+  bookingCode: string;
+  buyerName: string;
+  phone: string;
+  email: string;
+  ticketQuantity: number;
+  ticketCodes: string[];
+  paymentStatus: 'PAID' | 'PARTIAL' | 'PENDING' | 'Paid' | 'Pending' | 'Cancelled';
+  paymentMethod: 'CASH' | 'UPI' | 'CARD' | 'OTHER';
+  totalAmount: number;
+  amountPaid: number;
+  notes: string;
+  source: 'OFFLINE' | 'ONLINE';
+  enteredCount?: number;
+  notEnteredCount?: number;
+  tickets?: TicketItem[];
+  createdAt: string;
+  updatedAt: string;
 }
 
-export function calculateSummary(tickets: Record<string, TicketRecord>): SummaryCounts {
-  const list = Object.values(tickets);
-  const total = list.length;
-  // A ticket is registered if it has a buyerName or is not 'available'
-  const registered = list.filter(t => (t.buyerName && t.buyerName.trim() !== '') || t.status === 'reserved' || t.status === 'entered').length;
-  const available = total - registered;
-  const entered = list.filter(t => t.entered).length;
-  const notEntered = registered - entered;
-  const totalGuests = list.reduce((sum, t) => sum + (t.buyerName ? (t.guests || 1) : 0), 0);
-  const totalRevenue = list.reduce((sum, t) => {
-    if (t.buyerName && t.paymentStatus === 'Paid') {
-      return sum + (t.amount || 0);
-    }
-    return sum;
-  }, 0);
-
-  return {
-    total,
-    registered,
-    available,
-    entered,
-    notEntered: Math.max(0, notEntered),
-    totalGuests,
-    totalRevenue
+export interface ApiResponse<T = any> {
+  success: boolean;
+  data?: T;
+  error?: {
+    code: string;
+    message: string;
+    blockedTicket?: string;
   };
+  message?: string;
 }
+
+const JWT_TOKEN_KEY = 'hoh_admin_token';
+const ADMIN_INFO_KEY = 'hoh_admin_info';
 
 class ApiClient {
-  private session: StaffSession;
   private token: string | null = null;
+  private admin: { username: string; email: string } | null = null;
 
   constructor() {
-    this.session = this.loadSession();
-    this.token = typeof window !== 'undefined' ? localStorage.getItem(JWT_TOKEN_KEY) : null;
-  }
-
-  private loadSession(): StaffSession {
-    try {
-      const raw = localStorage.getItem(STAFF_SESSION_KEY);
-      if (raw) {
-        return JSON.parse(raw);
+    if (typeof window !== 'undefined') {
+      this.token = localStorage.getItem(JWT_TOKEN_KEY);
+      const rawAdmin = localStorage.getItem(ADMIN_INFO_KEY);
+      if (rawAdmin) {
+        try {
+          this.admin = JSON.parse(rawAdmin);
+        } catch {
+          this.admin = null;
+        }
       }
-    } catch (e) {
-      console.error('Failed to load session:', e);
-    }
-    return {
-      role: 'admin',
-      identity: 'Admin Staff',
-      passkey: DEFAULT_PASSKEYS.admin
-    };
-  }
-
-  public getSession(): StaffSession {
-    return { ...this.session };
-  }
-
-  public setSession(session: StaffSession): void {
-    this.session = session;
-    try {
-      localStorage.setItem(STAFF_SESSION_KEY, JSON.stringify(session));
-    } catch (e) {
-      console.error('Failed to save session:', e);
     }
   }
 
-  public setToken(token: string | null): void {
+  public getToken(): string | null {
+    return this.token;
+  }
+
+  public getAdmin(): { username: string; email: string } | null {
+    return this.admin;
+  }
+
+  public isAuthenticated(): boolean {
+    return !!this.token;
+  }
+
+  public setSession(token: string, admin: { username: string; email: string }): void {
     this.token = token;
-    if (token) {
+    this.admin = admin;
+    if (typeof window !== 'undefined') {
       localStorage.setItem(JWT_TOKEN_KEY, token);
-    } else {
-      localStorage.removeItem(JWT_TOKEN_KEY);
+      localStorage.setItem(ADMIN_INFO_KEY, JSON.stringify(admin));
     }
   }
 
-  private getAuthHeaders(includeRequestId = true): Record<string, string> {
+  public logout(): void {
+    this.token = null;
+    this.admin = null;
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(JWT_TOKEN_KEY);
+      localStorage.removeItem(ADMIN_INFO_KEY);
+    }
+  }
+
+  private getHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'X-Staff-Passkey': this.session.passkey || ''
+      'Content-Type': 'application/json'
     };
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
-    }
-    if (includeRequestId) {
-      headers['X-Request-ID'] = generateRequestId();
     }
     return headers;
   }
 
   /**
-   * Fetch all 50 tickets from MongoDB backend
+   * Admin Login
    */
-  public async fetchTickets(): Promise<ApiResponse<Record<string, TicketRecord>>> {
+  public async login(usernameOrEmail: string, password: string): Promise<ApiResponse<{ token: string; admin: any }>> {
     try {
-      const res = await fetch('/api/tickets', {
-        headers: this.getAuthHeaders(false)
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usernameOrEmail, password })
       });
-      if (!res.ok) {
-        return { ok: false, error: 'Failed to fetch tickets from server.' };
-      }
       const json = await res.json();
-      if (!json.success || !Array.isArray(json.data)) {
-        return { ok: false, error: json.error || 'Invalid ticket data from server.' };
+
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'LOGIN_FAILED', message: 'Invalid username or password.' }
+        };
       }
 
-      // Convert array to Record<string, TicketRecord>
-      const map: Record<string, TicketRecord> = createDefaultTickets();
-      json.data.forEach((t: any) => {
-        map[t.code] = {
-          code: t.code,
-          qrPayload: t.qrPayload || t.code,
-          serialNumber: t.serialNumber,
-          bookingId: t.bookingId,
-          bookingCode: t.bookingCode,
-          buyerName: t.buyerName || '',
-          phone: t.buyerPhone || t.phone || '',
-          email: t.buyerEmail || t.email || '',
-          guests: 1,
-          paymentStatus: (t.paymentStatus as PaymentStatus) || 'Pending',
-          amount: t.totalAmount || 0,
-          notes: t.notes || '',
-          status: t.status || (t.buyerName ? 'reserved' : 'available'),
-          entered: !!t.entered,
-          enteredAt: t.enteredAt,
-          entryCount: t.entryCount || 0,
-          updatedAt: t.updatedAt || new Date().toISOString(),
-          updatedBy: t.bookingCreatedBy || 'staff'
-        };
-      });
-
-      // Save to local cache
-      saveLocalTickets(map);
+      this.setSession(json.token, json.admin || json.user);
 
       return {
-        ok: true,
-        data: map
+        success: true,
+        data: json
       };
-    } catch (err: any) {
-      console.warn('Backend tickets fetch error, using local cache:', err.message);
+    } catch {
       return {
-        ok: true,
-        data: getLocalTickets()
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database or API server.' }
       };
     }
   }
 
   /**
-   * Preview consecutive ticket allocation
+   * Fetch Live Dashboard Stats directly from MongoDB
+   */
+  public async fetchDashboard(): Promise<ApiResponse<DashboardStats>> {
+    try {
+      const res = await fetch('/api/dashboard', {
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        if (res.status === 401) this.logout();
+        return {
+          success: false,
+          error: json.error || { code: 'STATS_ERROR', message: 'Failed to fetch stats.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data || json.stats || json
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Fetch All 50 Tickets directly from MongoDB
+   */
+  public async fetchTickets(params?: { search?: string; status?: string; entered?: boolean }): Promise<ApiResponse<TicketItem[]>> {
+    try {
+      let url = '/api/tickets';
+      const searchParams = new URLSearchParams();
+      if (params?.search) searchParams.append('search', params.search);
+      if (params?.status) searchParams.append('status', params.status);
+      if (params?.entered !== undefined) searchParams.append('entered', String(params.entered));
+      const queryString = searchParams.toString();
+      if (queryString) url += `?${queryString}`;
+
+      const res = await fetch(url, {
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+
+      if (!res.ok || !json.success) {
+        if (res.status === 401) this.logout();
+        return {
+          success: false,
+          error: json.error || { code: 'FETCH_ERROR', message: 'Failed to fetch tickets from MongoDB.' }
+        };
+      }
+
+      return {
+        success: true,
+        data: json.data || json.tickets || []
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Single Ticket Lookup (e.g. for QR Scanner)
+   */
+  public async getTicket(code: string): Promise<ApiResponse<TicketItem>> {
+    try {
+      const res = await fetch(`/api/tickets/${encodeURIComponent(code)}`, {
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'LOOKUP_FAILED', message: `Ticket ${code} was not found.` }
+        };
+      }
+      return {
+        success: true,
+        data: json.data
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Manual Entry: Mark Ticket as ENTERED
+   */
+  public async markEntered(code: string): Promise<ApiResponse<TicketItem>> {
+    try {
+      const res = await fetch(`/api/tickets/${encodeURIComponent(code)}/entry`, {
+        method: 'PUT',
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'UPDATE_FAILED', message: 'Failed to mark ticket as entered.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data,
+        message: json.message
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Manual Entry Undo: Mark Ticket as NOT ENTERED
+   */
+  public async markNotEntered(code: string): Promise<ApiResponse<TicketItem>> {
+    try {
+      const res = await fetch(`/api/tickets/${encodeURIComponent(code)}/not-entry`, {
+        method: 'PUT',
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'UPDATE_FAILED', message: 'Failed to revert ticket entry.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data,
+        message: json.message
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Cancel / Void a Physical Ticket (LOST, DAMAGED, VOID, OTHER)
+   */
+  public async cancelTicket(code: string, reason: string = 'VOID'): Promise<ApiResponse<TicketItem>> {
+    try {
+      const res = await fetch(`/api/tickets/${encodeURIComponent(code)}/cancel`, {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ reason })
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'CANCEL_FAILED', message: 'Failed to cancel ticket.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data,
+        message: json.message
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Uncancel / Restore a Physical Ticket to AVAILABLE
+   */
+  public async uncancelTicket(code: string): Promise<ApiResponse<TicketItem>> {
+    try {
+      const res = await fetch(`/api/tickets/${encodeURIComponent(code)}/uncancel`, {
+        method: 'PUT',
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'UNCANCEL_FAILED', message: 'Failed to uncancel ticket.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data,
+        message: json.message
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Register Ticket(s) / Offline Sale with Anchor-Driven Allocation
+   */
+  public async registerBooking(params: {
+    buyerName: string;
+    phone: string;
+    email?: string;
+    ticketQuantity: number;
+    anchorTicket?: string;
+    startCode?: string;
+    paymentStatus?: string;
+    paymentMethod?: string;
+    totalAmount?: number;
+    amountPaid?: number;
+    notes?: string;
+    allowNonConsecutive?: boolean;
+    allowOverride?: boolean;
+    idempotencyKey?: string;
+  }): Promise<ApiResponse<{ booking: BookingItem; tickets: string[]; isConsecutive?: boolean }>> {
+    try {
+      const headers = this.getHeaders();
+      if (params.idempotencyKey) {
+        headers['Idempotency-Key'] = params.idempotencyKey;
+      }
+
+      const res = await fetch('/api/bookings', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(params)
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'BOOKING_FAILED', message: 'Registration failed.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data,
+        message: json.message
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Preview physical ticket sale starting from anchor
+   */
+  public async previewSale(
+    anchorCode: string,
+    quantity: number,
+    allowOverride: boolean = false
+  ): Promise<{
+    success: boolean;
+    anchorTicket: string;
+    proposedCodes: string[];
+    isConsecutive: boolean;
+    blockedTicket?: string;
+    skippedTickets?: string[];
+    message: string;
+    reason?: string;
+    availableTotal: number;
+  }> {
+    try {
+      const res = await fetch(`/api/tickets/${encodeURIComponent(anchorCode)}/preview-sale`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ quantity, allowOverride })
+      });
+      return await res.json();
+    } catch {
+      return {
+        success: false,
+        anchorTicket: anchorCode,
+        proposedCodes: [],
+        isConsecutive: false,
+        message: 'Unable to calculate ticket allocation (server unavailable).',
+        availableTotal: 0
+      };
+    }
+  }
+
+  /**
+   * Preview consecutive ticket allocation (general)
    */
   public async previewAllocation(quantity: number, startCode?: string): Promise<{
     success: boolean;
@@ -218,357 +475,298 @@ class ApiClient {
     message: string;
     isConsecutive: boolean;
     availableTotal: number;
+    blockedTicket?: string;
   }> {
     try {
       const res = await fetch('/api/bookings/preview', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.getHeaders(),
         body: JSON.stringify({ quantity, startCode })
       });
-      if (res.ok) {
-        const text = await res.text();
-        if (text && text.trim().startsWith('{')) {
-          const json = JSON.parse(text);
-          if (json && typeof json.success === 'boolean') {
-            return json;
-          }
-        }
-      }
+      return await res.json();
     } catch {
-      // Backend not running / proxy error, gracefully fallback to local calculator
+      return {
+        success: false,
+        proposedCodes: [],
+        message: 'Unable to check consecutive allocation (database unavailable).',
+        isConsecutive: false,
+        availableTotal: 0
+      };
     }
-
-    // Rock-solid client calculation from active tickets cache
-    const local = getLocalTickets();
-    const result = calculateConsecutiveSeats(local, quantity, startCode);
-    const availableTotal = Object.values(local).filter(t => !t.buyerName).length;
-    return {
-      success: result.success,
-      proposedCodes: result.proposedCodes,
-      message: result.message,
-      isConsecutive: result.isConsecutive,
-      availableTotal
-    };
   }
 
   /**
-   * Create Booking (multi-ticket consecutive allocation)
+   * Fetch All Bookings
    */
-  public async createBooking(params: {
-    buyerName: string;
-    phone: string;
-    email?: string;
-    ticketQuantity: number;
-    paymentStatus: PaymentStatus;
-    totalAmount: number;
-    notes?: string;
-    allowNonConsecutive?: boolean;
-    startCode?: string;
-  }): Promise<ApiResponse<{ booking: any; tickets: any[] }>> {
+  public async fetchBookings(): Promise<ApiResponse<BookingItem[]>> {
     try {
       const res = await fetch('/api/bookings', {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'FETCH_ERROR', message: 'Failed to fetch bookings.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data || json.bookings || []
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Fetch Single Booking Detail
+   */
+  public async getBooking(id: string): Promise<ApiResponse<BookingItem>> {
+    try {
+      const res = await fetch(`/api/bookings/${encodeURIComponent(id)}`, {
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'FETCH_ERROR', message: 'Failed to fetch booking details.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Update Existing Booking Details
+   */
+  public async updateBooking(id: string, params: Partial<BookingItem>): Promise<ApiResponse<BookingItem>> {
+    try {
+      const res = await fetch(`/api/bookings/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: this.getHeaders(),
         body: JSON.stringify(params)
       });
       const json = await res.json();
-
       if (!res.ok || !json.success) {
         return {
-          ok: false,
-          error: json.error || 'Sync Failed — no ticket change was saved.'
+          success: false,
+          error: json.error || { code: 'UPDATE_FAILED', message: 'Failed to update booking.' }
         };
       }
-
-      // Re-fetch tickets from server to keep state strictly synced
-      await this.fetchTickets();
-
       return {
-        ok: true,
-        data: {
-          booking: json.booking,
-          tickets: json.tickets
-        },
-        message: json.message
-      };
-    } catch (err: any) {
-      return {
-        ok: false,
-        error: 'Sync Failed — no ticket change was saved. Could not connect to backend server.'
-      };
-    }
-  }
-
-  /**
-   * Verify single ticket QR code
-   */
-  public async verifyTicket(codeOrPayload: string): Promise<ApiResponse<{
-    valid: boolean;
-    canEnter: boolean;
-    ticket: any;
-    booking: any;
-    statusMessage: string;
-  }>> {
-    try {
-      const isCode = codeOrPayload.toUpperCase().startsWith('HOH') && codeOrPayload.length === 6;
-      const body = isCode ? { code: codeOrPayload } : { qrPayload: codeOrPayload };
-
-      const res = await fetch('/api/tickets/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      const json = await res.json();
-
-      if (!res.ok || !json.success) {
-        return {
-          ok: false,
-          error: json.error || 'Invalid or unregistered ticket QR pass.'
-        };
-      }
-
-      return {
-        ok: true,
-        data: json
-      };
-    } catch (err: any) {
-      return {
-        ok: false,
-        error: 'Scanner failed to reach server. Check backend connection.'
-      };
-    }
-  }
-
-  /**
-   * Mark ticket entered at gate
-   */
-  public async markEntered(code: string, gateName = 'Main Gate', notes = ''): Promise<ApiResponse<TicketRecord>> {
-    try {
-      const res = await fetch('/api/tickets/mark-entered', {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify({ code, gateName, notes })
-      });
-      const json = await res.json();
-
-      if (!res.ok || !json.success) {
-        return {
-          ok: false,
-          error: json.error || 'Sync Failed — no change was saved.'
-        };
-      }
-
-      // Refresh cache from server
-      await this.fetchTickets();
-
-      return {
-        ok: true,
-        data: json.ticket,
+        success: true,
+        data: json.data,
         message: json.message
       };
     } catch {
       return {
-        ok: false,
-        error: 'Sync Failed — no change was saved.'
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
       };
     }
   }
 
   /**
-   * Correct status (change entered to not entered or vice versa)
+   * Remove Single Ticket from Booking with reason
    */
-  public async correctStatus(params: {
-    code: string;
-    entered: boolean;
-    reason: string;
-  }): Promise<ApiResponse<TicketRecord>> {
+  public async removeTicketFromBooking(bookingId: string, code: string, reason: string = 'Removed by admin'): Promise<ApiResponse<BookingItem>> {
     try {
-      const res = await fetch('/api/tickets/correct-status', {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify(params)
-      });
-      const json = await res.json();
-
-      if (!res.ok || !json.success) {
-        return {
-          ok: false,
-          error: json.error || 'Sync Failed — no change was saved.'
-        };
-      }
-
-      await this.fetchTickets();
-
-      return {
-        ok: true,
-        data: json.ticket,
-        message: json.message
-      };
-    } catch {
-      return {
-        ok: false,
-        error: 'Sync Failed — no change was saved.'
-      };
-    }
-  }
-
-  /**
-   * Clear single ticket buyer data
-   */
-  public async clearTicketData(params: {
-    code: string;
-    reason: string;
-    confirmCode: string;
-  }): Promise<ApiResponse<TicketRecord>> {
-    if (params.code !== params.confirmCode) {
-      return { ok: false, error: 'Confirmation code does not match ticket code.' };
-    }
-
-    try {
-      const res = await fetch('/api/tickets/clear', {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify({
-          code: params.code,
-          reason: params.reason
-        })
-      });
-      const json = await res.json();
-
-      if (!res.ok || !json.success) {
-        return {
-          ok: false,
-          error: json.error || 'Sync Failed — no change was saved.'
-        };
-      }
-
-      await this.fetchTickets();
-
-      return {
-        ok: true,
-        data: json.ticket,
-        message: json.message
-      };
-    } catch {
-      return {
-        ok: false,
-        error: 'Sync Failed — no change was saved.'
-      };
-    }
-  }
-
-  /**
-   * Clear entire booking (all tickets in the group)
-   */
-  public async clearBooking(params: {
-    bookingCode: string;
-    reason: string;
-  }): Promise<ApiResponse<{ clearedTickets: string[] }>> {
-    try {
-      const res = await fetch('/api/bookings/clear', {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify(params)
-      });
-      const json = await res.json();
-
-      if (!res.ok || !json.success) {
-        return {
-          ok: false,
-          error: json.error || 'Sync Failed — no change was saved.'
-        };
-      }
-
-      await this.fetchTickets();
-
-      return {
-        ok: true,
-        data: { clearedTickets: json.clearedTickets },
-        message: json.message
-      };
-    } catch {
-      return {
-        ok: false,
-        error: 'Sync Failed — no change was saved.'
-      };
-    }
-  }
-
-  /**
-   * Prepare event reset (Super Admin only - generates 5-minute one-time token)
-   */
-  public async prepareEventReset(reason: string): Promise<ApiResponse<{
-    resetToken: string;
-    expiresInSeconds: number;
-    registeredCount: number;
-    enteredCount: number;
-  }>> {
-    try {
-      const res = await fetch('/api/event/prepare-reset', {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
+      const res = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/tickets/${encodeURIComponent(code)}`, {
+        method: 'DELETE',
+        headers: this.getHeaders(),
         body: JSON.stringify({ reason })
       });
       const json = await res.json();
-
       if (!res.ok || !json.success) {
         return {
-          ok: false,
-          error: json.error || 'Failed to prepare event reset.'
+          success: false,
+          error: json.error || { code: 'REMOVE_FAILED', message: 'Failed to remove ticket.' }
         };
       }
-
       return {
-        ok: true,
-        data: json
+        success: true,
+        data: json.data,
+        message: json.message
       };
     } catch {
       return {
-        ok: false,
-        error: 'Sync Failed — no change was saved.'
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
       };
     }
   }
 
   /**
-   * Confirm full event reset with backup snapshot in eventBackups collection
+   * Edit Single Ticket Buyer Details
    */
-  public async confirmEventReset(params: {
-    token: string;
-    confirmText: string;
-    reason?: string;
-  }): Promise<ApiResponse<{ backupSaved: boolean }>> {
+  public async updateTicket(code: string, params: {
+    buyerName?: string;
+    phone?: string;
+    email?: string;
+    paymentStatus?: string;
+    totalAmount?: number;
+    notes?: string;
+  }): Promise<ApiResponse<TicketItem>> {
     try {
-      const res = await fetch('/api/event/confirm-reset', {
-        method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify({
-          resetToken: params.token,
-          confirmation: params.confirmText
-        })
+      const res = await fetch(`/api/tickets/${encodeURIComponent(code)}`, {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify(params)
       });
       const json = await res.json();
-
       if (!res.ok || !json.success) {
         return {
-          ok: false,
-          error: json.error || 'Sync Failed — no change was saved.'
+          success: false,
+          error: json.error || { code: 'UPDATE_FAILED', message: 'Failed to update ticket details.' }
         };
       }
-
-      await this.fetchTickets();
-
       return {
-        ok: true,
-        data: { backupSaved: true },
+        success: true,
+        data: json.data,
         message: json.message
       };
     } catch {
       return {
-        ok: false,
-        error: 'Sync Failed — no change was saved.'
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
       };
     }
+  }
+
+  /**
+   * QR Verification (POST /api/tickets/verify)
+   */
+  public async verifyTicket(code: string): Promise<{ ok: boolean; ticket?: any; error?: string }> {
+    try {
+      const res = await fetch('/api/tickets/verify', {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ code: code.trim().toUpperCase() })
+      });
+      return await res.json();
+    } catch {
+      return { ok: false, error: 'Network error connecting to database.' };
+    }
+  }
+
+  /**
+   * Clear Ticket Booking (returns ticket to available pool, never deletes document)
+   */
+  public async clearTicket(code: string, confirmEntered: boolean = false): Promise<ApiResponse<TicketItem>> {
+    try {
+      const res = await fetch(`/api/tickets/${encodeURIComponent(code)}/booking`, {
+        method: 'DELETE',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ confirmEntered })
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'CLEAR_FAILED', message: 'Failed to clear ticket.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data,
+        message: json.message
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Clear Entire Booking
+   */
+  public async clearBooking(bookingCode: string, confirmEntered: boolean = false): Promise<ApiResponse<{ clearedTickets: string[] }>> {
+    try {
+      const res = await fetch('/api/bookings/clear', {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ bookingCode, confirmEntered })
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'CLEAR_FAILED', message: 'Failed to clear booking.' }
+        };
+      }
+      return {
+        success: true,
+        data: json.data,
+        message: json.message
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Event Reset: Purge bookings, reset all 50 tickets to available, preserve admin
+   */
+  public async resetEvent(confirmText: string = 'RESET HOH EVENT'): Promise<ApiResponse<{ message: string; backupId?: string }>> {
+    try {
+      const res = await fetch('/api/event/reset', {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ confirmText })
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: 'RESET_FAILED', message: 'Failed to reset event.' }
+        };
+      }
+      return {
+        success: true,
+        message: json.message,
+        data: json
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  // Backward compatibility methods for tests / components
+  public async adminLogin(usernameOrEmail: string, password: string) {
+    return this.login(usernameOrEmail, password);
+  }
+  public async setEntryStatus(code: string, entered: boolean) {
+    return entered ? this.markEntered(code) : this.markNotEntered(code);
+  }
+  public async createBooking(params: any) {
+    return this.registerBooking(params);
+  }
+  public async clearTicketData(params: { code: string }) {
+    return this.clearTicket(params.code);
+  }
+  public async clearEventData() {
+    return this.resetEvent();
   }
 }
 

@@ -2,376 +2,748 @@ import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { Booking } from '../models/Booking';
 import { Ticket } from '../models/Ticket';
-import { AuditLog } from '../models/AuditLog';
 import { IdempotencyKey } from '../models/IdempotencyKey';
-import { findConsecutiveTickets, previewAllocation } from '../services/allocationService';
-import { updateMemoryTicket } from '../services/inMemoryStore';
+import { getNextBookingCode } from '../models/Counter';
+import {
+  findConsecutiveFromAnchor,
+  findConsecutiveTickets,
+  previewPhysicalSale,
+  previewAllocation
+} from '../services/allocationService';
+import { logAudit } from '../services/auditService';
+import { localDataStore } from '../services/localDataStore';
+import { fastCache } from '../services/cacheService';
 
-/**
- * Generate unique booking code e.g. "HOH-BOOK-000001"
- */
-async function generateBookingCode(): Promise<string> {
-  const count = await Booking.countDocuments();
-  const num = String(count + 1).padStart(6, '0');
-  return `HOH-BOOK-${num}`;
+function isDbReady(): boolean {
+  return mongoose.connection.readyState === 1;
 }
 
-/**
- * POST /api/bookings/preview
- */
-export const previewBooking = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const quantity = parseInt(req.body.quantity || req.body.count, 10) || 1;
-    const startCode = req.body.startCode ? String(req.body.startCode).trim().toUpperCase() : undefined;
-    const preview = await previewAllocation(quantity, startCode);
-    res.json(preview);
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+const DB_UNAVAILABLE_RESPONSE = {
+  success: false,
+  error: {
+    code: 'DATABASE_UNAVAILABLE',
+    message: 'Unable to connect to database. MongoDB connection is currently unavailable.'
   }
 };
 
 /**
- * POST /api/bookings
- * Atomic transaction-based booking creation with DSA consecutive serial allocation
+ * POST /api/tickets/:code/preview-sale & POST /api/bookings/preview
+ * Preview allocation for physical ticket scan
  */
-export const createBooking = async (req: Request, res: Response): Promise<void> => {
-  const {
-    buyerName,
-    phone,
-    email = '',
-    ticketQuantity,
-    quantity,
-    startCode,
-    paymentStatus = 'Paid',
-    totalAmount = 0,
-    notes = '',
-    requestId,
-    allowNonConsecutive = false
-  } = req.body;
+export const previewSale = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    const anchorCode = (req.params.code || req.body.anchorTicket || req.body.startCode || '').trim().toUpperCase();
+    const quantity = parseInt(req.body.quantity || req.body.ticketQuantity || req.body.count, 10) || 1;
+    const allowOverride = req.body.allowOverride === true || req.body.allowNonConsecutive === true;
 
-  // 1. Input Validation
-  if (!buyerName || typeof buyerName !== 'string' || !buyerName.trim()) {
-    res.status(400).json({ success: false, error: 'Buyer full name is required.' });
-    return;
-  }
-  if (!phone || typeof phone !== 'string' || !phone.trim()) {
-    res.status(400).json({ success: false, error: 'Phone number is required.' });
-    return;
-  }
-  const qty = parseInt(ticketQuantity || quantity, 10);
-  if (isNaN(qty) || qty < 1 || qty > 10) {
-    res.status(400).json({ success: false, error: 'Ticket quantity must be an integer between 1 and 10.' });
-    return;
-  }
+    const anchorNum = parseInt(anchorCode.replace('HOH', ''), 10);
+    const proposedCodes: string[] = [];
+    let blockedTicket: string | null = null;
 
-  // Resilient fallback when MongoDB Atlas is disconnected
-  if (mongoose.connection.readyState !== 1) {
-    const allocation = await findConsecutiveTickets(qty, undefined, allowNonConsecutive, startCode);
-    if (!allocation.success || allocation.tickets.length !== qty) {
-      res.status(409).json({ success: false, error: allocation.error || 'Allocation failed.' });
+    if (!anchorCode || isNaN(anchorNum)) {
+      res.status(400).json({ success: false, error: { code: 'INVALID_ANCHOR', message: 'Valid physical anchor ticket required' } });
       return;
     }
-    const bookingCode = `HOH-BK-${String(Date.now()).slice(-6)}`;
-    const updatedTickets = allocation.tickets.map(t => {
-      return updateMemoryTicket(t.code, {
-        buyerName,
-        buyerPhone: phone,
-        buyerEmail: email,
-        paymentStatus: paymentStatus as any,
-        totalAmount,
-        status: 'reserved',
-        bookingCode,
-        bookingCreatedBy: 'Staff'
+
+    if (anchorNum + quantity - 1 > 50 && !allowOverride) {
+      res.json({
+        success: false,
+        message: `Requested ${quantity} seats exceed maximum capacity. Only ${Math.max(0, 50 - anchorNum + 1)} tickets remain from ${anchorCode}.`,
+        proposedCodes: [],
+        blockedTicket: 'HOH051'
       });
-    });
-    res.status(201).json({
+      return;
+    }
+
+    for (let i = 0; i < quantity; i++) {
+      const code = `HOH${String(anchorNum + i).padStart(3, '0')}`;
+      const t = localDataStore.getTicketByCode(code);
+      if (!t || t.status === 'cancelled' || t.status === 'registered' || t.buyerName) {
+        blockedTicket = code;
+        break;
+      }
+      proposedCodes.push(code);
+    }
+
+    if (blockedTicket && !allowOverride) {
+      res.json({
+        success: false,
+        message: `Consecutive allocation unavailable. Starting ticket: ${anchorCode}. ${blockedTicket} is already sold or void.`,
+        proposedCodes: [],
+        blockedTicket
+      });
+      return;
+    }
+
+    if (blockedTicket && allowOverride) {
+      const avail = localDataStore.getTickets({ status: 'available' });
+      const overrideCodes = avail.slice(0, quantity).map(t => t.code);
+      res.json({
+        success: true,
+        message: `Allocated ${quantity} non-consecutive available tickets.`,
+        proposedCodes: overrideCodes,
+        isConsecutive: false
+      });
+      return;
+    }
+
+    res.json({
       success: true,
-      booking: { bookingCode, buyerName, phone, email, ticketCodes: updatedTickets.map(t => t?.code) },
-      tickets: updatedTickets,
-      message: `Successfully booked ${qty} tickets (${updatedTickets.map(t => t?.code).join(', ')}).`
+      message: `Successfully allocated consecutive tickets from ${anchorCode} to ${proposedCodes[proposedCodes.length - 1]}.`,
+      proposedCodes,
+      isConsecutive: true
     });
     return;
   }
 
-  const reqId = requestId || (req.headers['x-request-id'] as string) || `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-
-  // 2. Idempotency Check: Return cached response if already processed
   try {
-    const cachedIdempotency = await IdempotencyKey.findOne({ requestId: reqId });
-    if (cachedIdempotency) {
-      res.status(200).json({
-        ...cachedIdempotency.response,
-        idempotent: true
-      });
-      return;
+    const anchorCode = (req.params.code || req.body.anchorTicket || req.body.startCode || '').trim().toUpperCase();
+    const quantity = parseInt(req.body.quantity || req.body.ticketQuantity || req.body.count, 10) || 1;
+    const allowOverride = req.body.allowOverride === true || req.body.allowNonConsecutive === true;
+
+    if (anchorCode) {
+      const preview = await previewPhysicalSale(anchorCode, quantity, allowOverride);
+      res.json(preview);
+    } else {
+      const preview = await previewAllocation(quantity);
+      res.json(preview);
     }
   } catch (err: any) {
-    console.error('Idempotency lookup error:', err.message);
-  }
-
-  // 3. Authorization check for non-consecutive override
-  if (allowNonConsecutive && req.user && !['manager', 'admin'].includes(req.user.role)) {
-    res.status(403).json({
+    res.status(500).json({
       success: false,
-      error: 'Non-consecutive ticket allocation requires Manager or Admin authorization.'
+      error: { code: 'PREVIEW_ERROR', message: err.message }
+    });
+  }
+};
+
+export const previewBooking = previewSale;
+
+/**
+ * POST /api/bookings
+ * Create physical ticket booking with anchor-driven consecutive ticket allocation
+ */
+export const createBooking = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    const { buyerName, phone, email, ticketQuantity, quantity, anchorTicket, startCode, anchorTicketCode, paymentStatus, paymentMethod, amountPaid, notes } = req.body;
+    let ticketCodes = req.body.ticketCodes;
+    const qty = parseInt(ticketQuantity || quantity || (ticketCodes ? ticketCodes.length : 1), 10) || 1;
+    const anchor = (anchorTicket || startCode || anchorTicketCode || '').trim().toUpperCase();
+
+    if ((!ticketCodes || ticketCodes.length === 0) && anchor) {
+      const anchorNum = parseInt(anchor.replace('HOH', ''), 10);
+      ticketCodes = [];
+      for (let i = 0; i < qty; i++) {
+        ticketCodes.push(`HOH${String(anchorNum + i).padStart(3, '0')}`);
+      }
+    }
+
+    const result = localDataStore.createBooking({
+      buyerName,
+      phone,
+      email,
+      ticketQuantity: qty,
+      ticketCodes: ticketCodes || [],
+      paymentStatus,
+      paymentMethod,
+      amountPaid: Number(amountPaid) || 0,
+      notes
+    });
+    if (!result.success) {
+      res.status(400).json({ success: false, error: { code: 'BOOKING_FAILED', message: result.error } });
+      return;
+    }
+    fastCache.invalidateAll();
+    res.json({
+      success: true,
+      message: `Offline ticket sale registered successfully for ${buyerName}.`,
+      booking: result.booking,
+      tickets: result.tickets,
+      data: {
+        booking: result.booking,
+        tickets: (result.tickets || []).map((t: any) => t.code || t),
+        isConsecutive: true
+      }
     });
     return;
   }
 
-  const performedByUser = {
-    userId: req.user?.userId ? new mongoose.Types.ObjectId(req.user.userId) : undefined,
-    name: req.user?.name || 'Box Office Staff',
-    role: req.user?.role || 'sales'
-  };
-
-  // 4. Start MongoDB session & transaction
-  let session: mongoose.ClientSession | null = null;
-  let useTransactions = false;
-
   try {
-    session = await mongoose.startSession();
-    useTransactions = !!(mongoose.connection.db?.admin() && mongoose.connection.client.options.replicaSet);
-    if (useTransactions) {
-      session.startTransaction();
+    // 1. Check Idempotency Key
+    const idempotencyKey = (req.headers['idempotency-key'] as string) || req.body.idempotencyKey;
+    if (idempotencyKey) {
+      const existingKey = await IdempotencyKey.findOne({ key: idempotencyKey });
+      if (existingKey && existingKey.response) {
+        res.status(existingKey.statusCode || 200).json(existingKey.response);
+        return;
+      }
     }
-  } catch {
-    useTransactions = false;
-    session = null;
-  }
 
-  try {
-    // 5. Find first available consecutive ticket range using DSA sliding window
-    const allocation = await findConsecutiveTickets(qty, session || undefined, allowNonConsecutive, startCode);
-    if (!allocation.success || allocation.tickets.length !== qty) {
-      if (useTransactions && session) await session.abortTransaction();
+    const {
+      buyerName,
+      phone,
+      email = '',
+      ticketQuantity,
+      quantity,
+      anchorTicket,
+      startCode,
+      paymentStatus = 'PAID',
+      paymentMethod = 'CASH',
+      totalAmount = 0,
+      amountPaid,
+      notes = '',
+      allowNonConsecutive = false,
+      allowOverride = false
+    } = req.body;
+
+    if (!buyerName || typeof buyerName !== 'string' || !buyerName.trim()) {
       res.status(400).json({
         success: false,
-        error: allocation.error || `No consecutive block of ${qty} tickets is available.`,
-        availableSingles: allocation.availableSingles
+        error: { code: 'MISSING_NAME', message: 'Customer full name is required.' }
       });
       return;
     }
 
-    const assignedTicketCodes = allocation.tickets.map(t => t.code);
-    const assignedTicketIds = allocation.tickets.map(t => t._id);
+    if (!phone || typeof phone !== 'string' || !phone.trim()) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_PHONE', message: 'Customer phone number is required.' }
+      });
+      return;
+    }
 
-    // 6. Recheck ticket status inside transaction (prevent race conditions)
-    const recheckQuery = Ticket.find({
-      _id: { $in: assignedTicketIds },
-      status: 'available',
-      bookingId: null
-    });
-    if (session) recheckQuery.session(session);
-    const verifiedAvailable = await recheckQuery.exec();
+    const qty = parseInt(ticketQuantity || quantity, 10);
+    if (isNaN(qty) || qty < 1 || qty > 50) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_QUANTITY', message: 'Ticket quantity must be between 1 and 50.' }
+      });
+      return;
+    }
 
-    if (verifiedAvailable.length !== qty) {
-      if (useTransactions && session) await session.abortTransaction();
+    const anchor = (anchorTicket || startCode || '').trim().toUpperCase();
+    const canOverride = allowNonConsecutive || allowOverride;
+
+    // 2. Perform allocation verification
+    let assignedTicketCodes: string[] = [];
+    let assignedTicketIds: any[] = [];
+    let isConsecutive = true;
+
+    if (anchor) {
+      const allocation = await findConsecutiveFromAnchor(anchor, qty, undefined, canOverride);
+      if (!allocation.success || allocation.tickets.length !== qty) {
+        res.status(400).json({
+          success: false,
+          error: {
+            code: allocation.reason || 'ALLOCATION_FAILED',
+            message: allocation.message || `Could not allocate ${qty} tickets starting from ${anchor}.`,
+            blockedTicket: allocation.blockedTicket
+          }
+        });
+        return;
+      }
+      assignedTicketCodes = allocation.tickets.map(t => t.code);
+      assignedTicketIds = allocation.tickets.map(t => t._id);
+      isConsecutive = allocation.isConsecutive;
+    } else {
+      const allocation = await findConsecutiveTickets(qty, undefined, canOverride);
+      if (!allocation.success || allocation.tickets.length !== qty) {
+        res.status(400).json({
+          success: false,
+          error: {
+            code: 'ALLOCATION_FAILED',
+            message: allocation.error || `No consecutive block of ${qty} tickets is available.`,
+            availableSingles: allocation.availableSingles
+          }
+        });
+        return;
+      }
+      assignedTicketCodes = allocation.tickets.map(t => t.code);
+      assignedTicketIds = allocation.tickets.map(t => t._id);
+    }
+
+    // 3. Re-verify in database that none of these tickets have been taken concurrently
+    const currentTickets = await Ticket.find({ _id: { $in: assignedTicketIds } });
+    const unavailable = currentTickets.find(t => t.status !== 'available' || t.bookingId !== null);
+    if (unavailable) {
       res.status(409).json({
         success: false,
-        error: 'Concurrency conflict: One or more selected tickets were reserved by another transaction. Please try again.'
+        error: {
+          code: 'TICKET_CONFLICT',
+          message: `Sale could not be completed. Ticket ${unavailable.code} is no longer available. No tickets were registered.`
+        }
       });
       return;
     }
 
-    // 7. Create booking document
-    const bookingCode = await generateBookingCode();
-    const [booking] = await Booking.create(
-      [
-        {
-          bookingCode,
-          buyerName: buyerName.trim(),
-          phone: phone.trim(),
-          email: email.trim(),
-          ticketQuantity: qty,
-          ticketCodes: assignedTicketCodes,
-          paymentStatus,
-          totalAmount: Number(totalAmount) || 0,
-          notes: notes.trim(),
-          createdBy: performedByUser
-        }
-      ],
-      session ? { session } : {}
-    );
+    // 4. Generate atomic collision-free booking code
+    const bookingCode = await getNextBookingCode();
 
-    // 8. Update selected ticket documents
+    const finalTotalAmount = Number(totalAmount) || 0;
+    const finalAmountPaid = amountPaid !== undefined ? Number(amountPaid) : finalTotalAmount;
+    const normPaymentMethod = (['CASH', 'UPI', 'CARD', 'OTHER'].includes(String(paymentMethod).toUpperCase())
+      ? String(paymentMethod).toUpperCase()
+      : 'CASH') as 'CASH' | 'UPI' | 'CARD' | 'OTHER';
+
+    const normPaymentStatus = (['PAID', 'PARTIAL', 'PENDING'].includes(String(paymentStatus).toUpperCase())
+      ? String(paymentStatus).toUpperCase()
+      : paymentStatus) as any;
+
+    const now = new Date();
+
+    const allocationMethod = (req.body.allocationMethod === 'MANUAL' || allowNonConsecutive || allowOverride || !isConsecutive)
+      ? 'MANUAL'
+      : 'CONSECUTIVE';
+
+    // 5. Create Booking document
+    const booking = await Booking.create({
+      bookingCode,
+      buyerName: buyerName.trim(),
+      phone: phone.trim(),
+      email: email.trim(),
+      ticketQuantity: qty,
+      ticketCodes: assignedTicketCodes,
+      anchorTicketCode: anchor || null,
+      allocationMethod,
+      paymentStatus: normPaymentStatus,
+      paymentMethod: normPaymentMethod,
+      totalAmount: finalTotalAmount,
+      amountPaid: finalAmountPaid,
+      notes: notes.trim(),
+      source: 'OFFLINE',
+      createdBy: req.user?.userId ? new mongoose.Types.ObjectId(req.user.userId) : undefined
+    });
+
+    // 6. Atomically update all allocated tickets
     await Ticket.updateMany(
       { _id: { $in: assignedTicketIds } },
       {
         $set: {
           bookingId: booking._id,
-          status: 'active',
+          buyerName: buyerName.trim(),
+          phone: phone.trim(),
+          email: email.trim(),
+          status: 'registered',
+          registeredAt: now,
           entered: false,
-          enteredAt: null,
-          entryCount: 0
-        },
-        $inc: { version: 1 }
-      },
-      session ? { session } : {}
-    );
-
-    // 9. Write audit log (mandatory - if audit fails, main action fails)
-    await AuditLog.create(
-      [
-        {
-          requestId: reqId,
-          action: 'CREATE_BOOKING',
-          bookingId: booking._id,
-          previousValue: { status: 'available' },
-          newValue: {
-            bookingCode,
-            ticketCodes: assignedTicketCodes,
-            buyerName: buyerName.trim(),
-            quantity: qty
-          },
-          reason: notes.trim() || 'New ticket booking',
-          performedBy: performedByUser
+          enteredAt: null
         }
-      ],
-      session ? { session } : {}
+      }
     );
 
-    // 10. Save idempotency record (expires in 24 hours)
+    logAudit({
+      action: 'OFFLINE_SALE_CREATED',
+      bookingId: booking._id,
+      ticketCode: assignedTicketCodes.join(', '),
+      adminUsername: req.user?.username,
+      newValue: {
+        bookingCode,
+        buyerName: booking.buyerName,
+        phone: booking.phone,
+        quantity: qty,
+        tickets: assignedTicketCodes,
+        totalAmount: finalTotalAmount,
+        amountPaid: finalAmountPaid,
+        paymentMethod: normPaymentMethod,
+        isConsecutive
+      }
+    });
+
     const responsePayload = {
       success: true,
+      message: `Successfully completed offline sale of ${qty} ticket${qty > 1 ? 's' : ''}: ${assignedTicketCodes.join(', ')}.`,
+      data: {
+        booking,
+        tickets: assignedTicketCodes,
+        isConsecutive
+      },
       booking,
-      tickets: assignedTicketCodes,
-      message: `Successfully booked ${qty} ticket${qty > 1 ? 's' : ''}: ${assignedTicketCodes.join(', ')}.`
+      tickets: assignedTicketCodes
     };
 
-    await IdempotencyKey.create(
-      [
-        {
-          requestId: reqId,
-          action: 'CREATE_BOOKING',
-          response: responsePayload,
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-        }
-      ],
-      session ? { session } : {}
-    );
-
-    // 11. Commit transaction
-    if (useTransactions && session) {
-      await session.commitTransaction();
+    // Save Idempotency Key if provided
+    if (idempotencyKey) {
+      await IdempotencyKey.create({
+        key: idempotencyKey,
+        response: responsePayload,
+        statusCode: 201,
+        createdAt: now
+      }).catch(() => {});
     }
 
-    // 12. Return booking with assigned ticket codes
+    fastCache.invalidateAll();
     res.status(201).json(responsePayload);
   } catch (err: any) {
-    if (useTransactions && session) {
-      await session.abortTransaction();
-    }
-    console.error('Booking creation error:', err);
     res.status(500).json({
       success: false,
-      error: 'Sync Failed — no change was saved. ' + (err.message || 'Transaction aborted.')
+      error: { code: 'BOOKING_ERROR', message: 'Registration failed: ' + err.message }
     });
-  } finally {
-    if (session) {
-      await session.endSession();
+  }
+};
+
+/**
+ * GET /api/bookings
+ * Fetch all bookings with live entry progress counts
+ */
+export const listBookings = async (req: Request, res: Response): Promise<void> => {
+  const cached = fastCache.get('bookings_list');
+  if (cached) {
+    res.json(cached);
+    return;
+  }
+
+  if (!isDbReady()) {
+    const bookings = localDataStore.listBookings();
+    const payload = {
+      success: true,
+      data: bookings,
+      bookings,
+      count: bookings.length
+    };
+    fastCache.set('bookings_list', payload, 1500);
+    res.json(payload);
+    return;
+  }
+
+  try {
+    const bookings = await Booking.find({}).sort({ createdAt: -1 }).lean();
+
+    // Fetch live entry status for all tickets
+    const allTickets = await Ticket.find({ bookingId: { $ne: null } }).lean();
+    const ticketMap = new Map(allTickets.map(t => [t.code, t]));
+
+    const enriched = bookings.map(b => {
+      const tickets = (b.ticketCodes || []).map(code => ticketMap.get(code)).filter(Boolean);
+      const enteredCount = tickets.filter(t => t?.entered).length;
+      const notEnteredCount = tickets.length - enteredCount;
+
+      return {
+        ...b,
+        enteredCount,
+        notEnteredCount,
+        tickets
+      };
+    });
+
+    const payload = {
+      success: true,
+      data: enriched,
+      bookings: enriched,
+      count: enriched.length
+    };
+    fastCache.set('bookings_list', payload, 1500);
+    res.json(payload);
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: { code: 'FETCH_BOOKINGS_ERROR', message: 'Failed to fetch bookings: ' + err.message }
+    });
+  }
+};
+
+/**
+ * GET /api/bookings/:id
+ * Single booking detail with associated tickets
+ */
+export const getBookingById = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    const id = req.params.id;
+    const booking = localDataStore.getBookingById(id);
+    if (!booking) {
+      res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: `Booking ${id} not found.` } });
+      return;
     }
+    const tickets = booking.ticketCodes.map(c => localDataStore.getTicketByCode(c)).filter(Boolean);
+    res.json({ success: true, data: { ...booking, tickets }, booking, tickets });
+    return;
+  }
+
+  try {
+    const id = req.params.id;
+    const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingCode: id };
+    const booking = await Booking.findOne(query).lean();
+
+    if (!booking) {
+      res.status(404).json({
+        success: false,
+        error: { code: 'BOOKING_NOT_FOUND', message: `Booking ${id} not found.` }
+      });
+      return;
+    }
+
+    const tickets = await Ticket.find({ bookingId: booking._id }).sort({ serialNumber: 1 }).lean();
+    const enteredCount = tickets.filter(t => t.entered).length;
+
+    res.json({
+      success: true,
+      data: {
+        ...booking,
+        tickets,
+        enteredCount,
+        notEnteredCount: tickets.length - enteredCount
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: { code: 'GET_BOOKING_ERROR', message: 'Failed to fetch booking: ' + err.message }
+    });
+  }
+};
+
+/**
+ * PUT /api/bookings/:id
+ * Edit existing booking details
+ */
+export const updateBooking = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    const bookingId = req.params.id;
+    const result = localDataStore.updateBooking(bookingId, req.body);
+    if (!result.success) {
+      res.status(404).json({ success: false, error: { code: 'UPDATE_FAILED', message: result.error } });
+      return;
+    }
+    res.json({ success: true, message: `Booking updated successfully.`, data: result.booking, booking: result.booking });
+    return;
+  }
+
+  try {
+    const bookingId = req.params.id;
+    const { buyerName, phone, email, paymentStatus, paymentMethod, totalAmount, amountPaid, notes } = req.body;
+
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      res.status(404).json({
+        success: false,
+        error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found.' }
+      });
+      return;
+    }
+
+    if (buyerName !== undefined) booking.buyerName = buyerName.trim();
+    if (phone !== undefined) booking.phone = phone.trim();
+    if (email !== undefined) booking.email = email.trim();
+    if (paymentStatus !== undefined) booking.paymentStatus = paymentStatus;
+    if (paymentMethod !== undefined) booking.paymentMethod = paymentMethod;
+    if (totalAmount !== undefined) booking.totalAmount = Number(totalAmount);
+    if (amountPaid !== undefined) booking.amountPaid = Number(amountPaid);
+    if (notes !== undefined) booking.notes = notes.trim();
+
+    await booking.save();
+
+    // Sync buyer details to associated tickets
+    await Ticket.updateMany(
+      { bookingId: booking._id },
+      {
+        $set: {
+          buyerName: booking.buyerName,
+          phone: booking.phone,
+          email: booking.email
+        }
+      }
+    );
+
+    logAudit({
+      action: 'BOOKING_EDITED',
+      bookingId: booking._id,
+      adminUsername: req.user?.username,
+      newValue: { buyerName: booking.buyerName, phone: booking.phone, paymentStatus: booking.paymentStatus }
+    });
+
+    res.json({
+      success: true,
+      message: `Booking ${booking.bookingCode} updated successfully.`,
+      data: booking,
+      booking
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: { code: 'UPDATE_BOOKING_ERROR', message: 'Failed to update booking: ' + err.message }
+    });
+  }
+};
+
+/**
+ * DELETE /api/bookings/:id/tickets/:code
+ * Remove single ticket from a booking with reason, releasing it to AVAILABLE
+ */
+export const removeTicketFromBooking = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
+    return;
+  }
+
+  try {
+    const bookingId = req.params.id;
+    const ticketCode = (req.params.code || '').toUpperCase().trim();
+    const reason = req.body.reason || 'Removed by admin';
+
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      res.status(404).json({
+        success: false,
+        error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found.' }
+      });
+      return;
+    }
+
+    if (!booking.ticketCodes.includes(ticketCode)) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'TICKET_NOT_IN_BOOKING', message: `Ticket ${ticketCode} is not in this booking.` }
+      });
+      return;
+    }
+
+    const ticket = await Ticket.findOne({ code: ticketCode });
+    const confirmEntered = req.body.confirmEntered === true || req.body.force === true;
+    if (ticket && ticket.entered && !confirmEntered) {
+      res.status(400).json({
+        success: false,
+        warning: 'TICKET_ALREADY_ENTERED',
+        error: {
+          code: 'TICKET_ALREADY_ENTERED',
+          message: `Ticket ${ticketCode} has already been marked ENTERED. Removing it will clear its booking assignment and entry state. Confirm to proceed.`
+        }
+      });
+      return;
+    }
+
+    // Release ticket
+    if (ticket) {
+      ticket.bookingId = null;
+      ticket.buyerName = null;
+      ticket.phone = null;
+      ticket.email = null;
+      ticket.status = 'available';
+      ticket.registeredAt = null;
+      ticket.entered = false;
+      ticket.enteredAt = null;
+      await ticket.save();
+    }
+
+    // Update booking
+    booking.ticketCodes = booking.ticketCodes.filter(c => c !== ticketCode);
+    booking.ticketQuantity = booking.ticketCodes.length;
+
+    if (booking.ticketQuantity === 0) {
+      await Booking.deleteOne({ _id: booking._id });
+    } else {
+      await booking.save();
+    }
+
+    logAudit({
+      action: 'TICKET_CLEARED',
+      bookingId: booking._id,
+      ticketCode,
+      adminUsername: req.user?.username,
+      reason
+    });
+
+    res.json({
+      success: true,
+      message: `Ticket ${ticketCode} removed from booking and returned to AVAILABLE pool.`,
+      data: booking
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: { code: 'REMOVE_TICKET_ERROR', message: 'Failed to remove ticket: ' + err.message }
+    });
   }
 };
 
 /**
  * POST /api/bookings/clear
- * Clear entire booking and return all associated tickets to available
+ * Clear entire booking and release all associated tickets
  */
 export const clearBooking = async (req: Request, res: Response): Promise<void> => {
-  const { bookingCode, reason, confirmText } = req.body;
-
-  if (!bookingCode || typeof bookingCode !== 'string') {
-    res.status(400).json({ success: false, error: 'Valid bookingCode is required.' });
+  if (!isDbReady()) {
+    const { bookingCode } = req.body;
+    const result = localDataStore.clearBooking(bookingCode);
+    if (!result.success) {
+      res.status(404).json({ success: false, error: { code: 'CLEAR_FAILED', message: result.error } });
+      return;
+    }
+    res.json({ success: true, message: result.message });
     return;
-  }
-  if (!reason || typeof reason !== 'string' || reason.trim().length < 10) {
-    res.status(400).json({ success: false, error: 'A mandatory reason (minimum 10 characters) is required to clear a booking.' });
-    return;
-  }
-  if (confirmText && confirmText.trim() !== bookingCode.trim()) {
-    res.status(400).json({ success: false, error: 'Confirmation text must match the booking code.' });
-    return;
-  }
-
-  const performedByUser = {
-    userId: req.user?.userId ? new mongoose.Types.ObjectId(req.user.userId) : undefined,
-    name: req.user?.name || 'Manager',
-    role: req.user?.role || 'manager'
-  };
-  const requestId = (req.headers['x-request-id'] as string) || `req_${Date.now()}`;
-
-  let session: mongoose.ClientSession | null = null;
-  let useTransactions = false;
-
-  try {
-    session = await mongoose.startSession();
-    useTransactions = !!(mongoose.connection.db?.admin() && mongoose.connection.client.options.replicaSet);
-    if (useTransactions) session.startTransaction();
-  } catch {
-    session = null;
-    useTransactions = false;
   }
 
   try {
-    const booking = await Booking.findOne({ bookingCode: bookingCode.trim() });
-    if (!booking) {
-      if (useTransactions && session) await session.abortTransaction();
-      res.status(404).json({ success: false, error: `Booking ${bookingCode} not found.` });
+    const { bookingCode } = req.body;
+
+    if (!bookingCode) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_CODE', message: 'bookingCode is required.' }
+      });
       return;
     }
 
-    const previousCodes = [...booking.ticketCodes];
+    const booking = await Booking.findOne({ bookingCode: bookingCode.trim() });
+    if (!booking) {
+      res.status(404).json({
+        success: false,
+        error: { code: 'BOOKING_NOT_FOUND', message: `Booking ${bookingCode} not found.` }
+      });
+      return;
+    }
 
-    // Release all tickets back to available
+    const ticketCodes = [...booking.ticketCodes];
+
+    // Check if any tickets have already been entered
+    const enteredTickets = await Ticket.find({ bookingId: booking._id, entered: true });
+    const confirmEntered = req.body.confirmEntered === true || req.body.force === true;
+    if (enteredTickets.length > 0 && !confirmEntered) {
+      res.status(400).json({
+        success: false,
+        warning: 'TICKET_ALREADY_ENTERED',
+        error: {
+          code: 'TICKET_ALREADY_ENTERED',
+          message: `${enteredTickets.length} ticket(s) in this booking have already been marked ENTERED (${enteredTickets.map(t => t.code).join(', ')}). Clearing will remove their booking and entry state. Confirm to proceed.`
+        }
+      });
+      return;
+    }
+
+    // Release all associated tickets back to AVAILABLE
     await Ticket.updateMany(
       { bookingId: booking._id },
       {
         $set: {
           bookingId: null,
+          buyerName: null,
+          phone: null,
+          email: null,
           status: 'available',
+          registeredAt: null,
           entered: false,
           enteredAt: null,
           entryCount: 0
-        },
-        $inc: { version: 1 }
-      },
-      session ? { session } : {}
-    );
-
-    booking.paymentStatus = 'Cancelled';
-    booking.notes = `${booking.notes ? booking.notes + ' | ' : ''}Cleared by ${performedByUser.name}: ${reason.trim()}`;
-    await booking.save(session ? { session } : undefined);
-
-    // Audit Log
-    await AuditLog.create(
-      [
-        {
-          requestId,
-          action: 'CLEAR_BOOKING',
-          bookingId: booking._id,
-          previousValue: { ticketCodes: previousCodes, paymentStatus: 'Paid' },
-          newValue: { ticketCodes: [], paymentStatus: 'Cancelled' },
-          reason: reason.trim(),
-          performedBy: performedByUser
         }
-      ],
-      session ? { session } : {}
+      }
     );
 
-    if (useTransactions && session) await session.commitTransaction();
+    await Booking.deleteOne({ _id: booking._id });
+
+    logAudit({
+      action: 'CLEAR_BOOKING',
+      bookingId: booking._id,
+      ticketCode: ticketCodes.join(', '),
+      adminUsername: req.user?.username,
+      reason: 'Entire booking cleared by admin'
+    });
 
     res.json({
       success: true,
-      message: `Booking ${bookingCode} cleared. Tickets (${previousCodes.join(', ')}) returned to available.`,
-      clearedTickets: previousCodes
+      message: `Booking ${bookingCode} cleared. Tickets (${ticketCodes.join(', ')}) returned to AVAILABLE pool.`,
+      clearedTickets: ticketCodes,
+      data: { clearedTickets: ticketCodes }
     });
   } catch (err: any) {
-    if (useTransactions && session) await session.abortTransaction();
     res.status(500).json({
       success: false,
-      error: 'Sync Failed — no change was saved. ' + err.message
+      error: { code: 'CLEAR_BOOKING_ERROR', message: 'Failed to clear booking: ' + err.message }
     });
-  } finally {
-    if (session) await session.endSession();
   }
 };

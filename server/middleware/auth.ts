@@ -1,29 +1,29 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import rateLimit from 'express-rate-limit';
 import mongoose from 'mongoose';
-import { User, UserRole } from '../models/User';
+import { env } from '../config/env';
+import { Admin } from '../models/Admin';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'hoh-jwt-secret-key-2025';
-
-export interface AuthenticatedUser {
-  userId?: string;
+export interface AuthenticatedAdmin {
+  userId: string;
   username: string;
-  name: string;
-  role: UserRole;
+  email: string;
+  role: 'admin';
 }
 
 declare global {
   namespace Express {
     interface Request {
-      user?: AuthenticatedUser;
+      user?: AuthenticatedAdmin;
       requestId?: string;
     }
   }
 }
 
 /**
- * Authentication middleware supporting both Bearer JWT and X-Staff-Passkey
+ * Admin Authentication Middleware
+ * Strictly requires a valid JWT signed with env.JWT_SECRET.
+ * Verifies the admin account is active in MongoDB.
  */
 export const authenticate = async (
   req: Request,
@@ -32,122 +32,86 @@ export const authenticate = async (
 ): Promise<void> => {
   try {
     const authHeader = req.headers.authorization;
-    const passkeyHeader = req.headers['x-staff-passkey'] as string | undefined;
 
-    // 1. Bearer Token Authentication
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split(' ')[1];
-      try {
-        const decoded = jwt.verify(token, JWT_SECRET) as AuthenticatedUser;
-        req.user = decoded;
-        return next();
-      } catch (err) {
-        res.status(401).json({ success: false, error: 'Invalid or expired token.' });
-        return;
-      }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      res.status(401).json({
+        success: false,
+        error: {
+          code: 'AUTH_REQUIRED',
+          message: 'Admin authentication token required. Provide Authorization: Bearer <token>'
+        }
+      });
+      return;
     }
 
-    // 2. Staff Passkey Authentication
-    if (passkeyHeader) {
-      const trimmed = passkeyHeader.trim();
+    const token = authHeader.split(' ')[1];
+    let decoded: any;
 
-      if (mongoose.connection.readyState !== 1) {
-        const defaultStaff = [
-          { role: 'admin' as UserRole, name: 'System Admin', username: 'admin', passkey: process.env.ADMIN_PASSKEY || 'hoh-admin-2025' },
-          { role: 'manager' as UserRole, name: 'Event Manager', username: 'manager', passkey: process.env.MANAGER_PASSKEY || 'hoh-mgr-2025' },
-          { role: 'sales' as UserRole, name: 'Box Office Sales', username: 'sales', passkey: process.env.SALES_PASSKEY || 'hoh-sales-2025' },
-          { role: 'entry' as UserRole, name: 'Gate Scanner Staff', username: 'entry', passkey: process.env.ENTRY_PASSKEY || 'hoh-door-2025' }
-        ];
-        const matched = defaultStaff.find(s => s.passkey === trimmed);
-        if (matched) {
-          req.user = {
-            username: matched.username,
-            name: matched.name,
-            role: matched.role
-          };
-          return next();
-        } else {
-          res.status(401).json({ success: false, error: 'Invalid staff passkey.' });
+    try {
+      decoded = jwt.verify(token, env.JWT_SECRET);
+    } catch (err: any) {
+      res.status(401).json({
+        success: false,
+        error: {
+          code: 'INVALID_TOKEN',
+          message: 'Invalid or expired session token. Please log in again.'
+        }
+      });
+      return;
+    }
+
+    // Verify admin exists and is active if MongoDB is connected and ID is a valid ObjectId
+    if (decoded.userId && mongoose.connection.readyState === 1 && mongoose.Types.ObjectId.isValid(decoded.userId)) {
+      try {
+        const adminDoc = await Admin.findById(decoded.userId).lean();
+        if (adminDoc && adminDoc.isActive === false) {
+          res.status(403).json({
+            success: false,
+            error: {
+              code: 'ACCOUNT_DISABLED',
+              message: 'Admin account has been deactivated.'
+            }
+          });
           return;
         }
-      }
-
-      const matchedUser = await User.findOne({ passkey: trimmed }).lean();
-      if (matchedUser) {
-        req.user = {
-          userId: matchedUser._id.toString(),
-          username: matchedUser.username,
-          name: matchedUser.name,
-          role: matchedUser.role
-        };
-        return next();
-      } else {
-        res.status(401).json({ success: false, error: 'Invalid staff passkey.' });
-        return;
+      } catch {
+        // Fall back gracefully if db query encounters temporary issues
       }
     }
 
-    res.status(401).json({ success: false, error: 'Authentication required. Provide Authorization Bearer token or X-Staff-Passkey header.' });
+    req.user = {
+      userId: decoded.userId || 'admin_id',
+      username: decoded.username || 'admin',
+      email: decoded.email || 'admin@houseofhumour.com',
+      role: 'admin'
+    };
+
+    next();
   } catch (err: any) {
-    res.status(500).json({ success: false, error: 'Internal server error during authentication.' });
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'AUTH_SERVER_ERROR',
+        message: 'Internal server error during authentication verification.'
+      }
+    });
   }
 };
 
 /**
- * Role-based authorization middleware
+ * Require Admin middleware (alias for authenticate)
  */
-export const requireRole = (allowedRoles: UserRole[]) => {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (!req.user) {
-      res.status(401).json({ success: false, error: 'Authentication required.' });
-      return;
-    }
+export const requireAdmin = authenticate;
 
-    // Admin has superuser access to all endpoints
-    if (req.user.role === 'admin' || allowedRoles.includes(req.user.role)) {
-      return next();
-    }
-
-    res.status(403).json({
-      success: false,
-      error: `Access denied. Requires role: [${allowedRoles.join(', ')}]. Your role: ${req.user.role}`
-    });
-  };
-};
+// Compatibility alias
+export const requireRole = (_allowedRoles: string[]) => authenticate;
 
 /**
- * Request ID tracking middleware for idempotency & audit logging
+ * Request ID tracking for traceability
  */
 export const requestIdMiddleware = (req: Request, res: Response, next: NextFunction): void => {
-  const reqId = (req.headers['x-request-id'] as string) || `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const reqId = (req.headers['x-request-id'] as string) || `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   req.requestId = reqId;
   res.setHeader('X-Request-ID', reqId);
   next();
 };
-
-/**
- * Rate limiters
- */
-export const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { success: false, error: 'Too many login attempts. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-export const entryLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 120,
-  message: { success: false, error: 'Gate scanner rate limit exceeded. Please slow down.' },
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-export const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1000,
-  message: { success: false, error: 'API rate limit reached. Please try again shortly.' },
-  standardHeaders: true,
-  legacyHeaders: false
-});
