@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+mongoose.set('bufferCommands', false);
+
 export const connectDB = async (customUri?: string): Promise<typeof mongoose> => {
   let uri = customUri || process.env.MONGO_URL || process.env.MONGODB_URI;
 
@@ -13,7 +15,8 @@ export const connectDB = async (customUri?: string): Promise<typeof mongoose> =>
 
   try {
     const conn = await mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 5000
+      serverSelectionTimeoutMS: 20000,
+      connectTimeoutMS: 20000,
     });
     console.log(`✅ MongoDB Connected successfully: ${conn.connection.host} / ${conn.connection.name}`);
     return conn;

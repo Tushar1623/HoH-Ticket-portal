@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
+import mongoose from 'mongoose';
 import { User, UserRole } from '../models/User';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'hoh-jwt-secret-key-2025';
@@ -48,7 +49,30 @@ export const authenticate = async (
 
     // 2. Staff Passkey Authentication
     if (passkeyHeader) {
-      const matchedUser = await User.findOne({ passkey: passkeyHeader.trim() }).lean();
+      const trimmed = passkeyHeader.trim();
+
+      if (mongoose.connection.readyState !== 1) {
+        const defaultStaff = [
+          { role: 'admin' as UserRole, name: 'System Admin', username: 'admin', passkey: process.env.ADMIN_PASSKEY || 'hoh-admin-2025' },
+          { role: 'manager' as UserRole, name: 'Event Manager', username: 'manager', passkey: process.env.MANAGER_PASSKEY || 'hoh-mgr-2025' },
+          { role: 'sales' as UserRole, name: 'Box Office Sales', username: 'sales', passkey: process.env.SALES_PASSKEY || 'hoh-sales-2025' },
+          { role: 'entry' as UserRole, name: 'Gate Scanner Staff', username: 'entry', passkey: process.env.ENTRY_PASSKEY || 'hoh-door-2025' }
+        ];
+        const matched = defaultStaff.find(s => s.passkey === trimmed);
+        if (matched) {
+          req.user = {
+            username: matched.username,
+            name: matched.name,
+            role: matched.role
+          };
+          return next();
+        } else {
+          res.status(401).json({ success: false, error: 'Invalid staff passkey.' });
+          return;
+        }
+      }
+
+      const matchedUser = await User.findOne({ passkey: trimmed }).lean();
       if (matchedUser) {
         req.user = {
           userId: matchedUser._id.toString(),

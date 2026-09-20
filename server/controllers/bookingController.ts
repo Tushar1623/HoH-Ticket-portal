@@ -5,6 +5,7 @@ import { Ticket } from '../models/Ticket';
 import { AuditLog } from '../models/AuditLog';
 import { IdempotencyKey } from '../models/IdempotencyKey';
 import { findConsecutiveTickets, previewAllocation } from '../services/allocationService';
+import { updateMemoryTicket } from '../services/inMemoryStore';
 
 /**
  * Generate unique booking code e.g. "HOH-BOOK-000001"
@@ -60,6 +61,35 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
   const qty = parseInt(ticketQuantity || quantity, 10);
   if (isNaN(qty) || qty < 1 || qty > 10) {
     res.status(400).json({ success: false, error: 'Ticket quantity must be an integer between 1 and 10.' });
+    return;
+  }
+
+  // Resilient fallback when MongoDB Atlas is disconnected
+  if (mongoose.connection.readyState !== 1) {
+    const allocation = await findConsecutiveTickets(qty, undefined, allowNonConsecutive, startCode);
+    if (!allocation.success || allocation.tickets.length !== qty) {
+      res.status(409).json({ success: false, error: allocation.error || 'Allocation failed.' });
+      return;
+    }
+    const bookingCode = `HOH-BK-${String(Date.now()).slice(-6)}`;
+    const updatedTickets = allocation.tickets.map(t => {
+      return updateMemoryTicket(t.code, {
+        buyerName,
+        buyerPhone: phone,
+        buyerEmail: email,
+        paymentStatus: paymentStatus as any,
+        totalAmount,
+        status: 'reserved',
+        bookingCode,
+        bookingCreatedBy: 'Staff'
+      });
+    });
+    res.status(201).json({
+      success: true,
+      booking: { bookingCode, buyerName, phone, email, ticketCodes: updatedTickets.map(t => t?.code) },
+      tickets: updatedTickets,
+      message: `Successfully booked ${qty} tickets (${updatedTickets.map(t => t?.code).join(', ')}).`
+    });
     return;
   }
 

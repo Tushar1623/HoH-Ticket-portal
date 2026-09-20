@@ -1,8 +1,13 @@
+import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { Ticket } from '../models/Ticket';
 import { User } from '../models/User';
 
 export async function initializeDatabase(): Promise<void> {
+  if (mongoose.connection.readyState !== 1) {
+    console.log('ℹ️ MongoDB connection not active yet (readyState !== 1). Skipping init until connected.');
+    return;
+  }
   try {
     // 1. Seed/ensure exactly 50 tickets HOH001 to HOH050
     const existingTickets = await Ticket.find().lean();

@@ -6,6 +6,7 @@ import { Booking } from '../models/Booking';
 import { AuditLog } from '../models/AuditLog';
 import { IdempotencyKey } from '../models/IdempotencyKey';
 import { EventBackup } from '../models/EventBackup';
+import { getMemoryTickets, getMemoryTicketByCode, updateMemoryTicket } from '../services/inMemoryStore';
 
 // In-memory one-time reset token store (token -> { expiresAt: number, reason: string })
 const resetTokenStore = new Map<string, { expiresAt: number; reason: string }>();
@@ -17,6 +18,28 @@ let lastResetTimestamp: number = 0;
  */
 export const getTickets = async (req: Request, res: Response): Promise<void> => {
   try {
+    if (mongoose.connection.readyState !== 1) {
+      const memoryList = getMemoryTickets();
+      const totalTickets = memoryList.length;
+      const totalEntered = memoryList.filter(t => t.entered).length;
+      const availableTickets = memoryList.filter(t => t.status === 'available').length;
+      const reservedTickets = memoryList.filter(t => t.status === 'active' || t.status === 'reserved' || t.status === 'entered').length;
+
+      res.json({
+        success: true,
+        data: memoryList,
+        isMemoryFallback: true,
+        stats: {
+          totalTickets,
+          totalEntered,
+          availableTickets,
+          reservedTickets,
+          attendanceRate: reservedTickets > 0 ? Math.round((totalEntered / reservedTickets) * 100) : 0
+        }
+      });
+      return;
+    }
+
     const tickets = await Ticket.find().sort({ serialNumber: 1 }).lean();
 
     // Fetch related bookings to enrich response
@@ -69,6 +92,25 @@ export const verifyTicket = async (req: Request, res: Response): Promise<void> =
 
     if (!code) {
       res.status(400).json({ success: false, error: 'Ticket code is required.' });
+      return;
+    }
+
+    if (mongoose.connection.readyState !== 1) {
+      const mem = getMemoryTicketByCode(code) || getMemoryTickets().find(t => t.qrPayload === code);
+      if (!mem) {
+        res.status(404).json({ success: false, valid: false, canEnter: false, error: `Ticket ${code} not found.` });
+        return;
+      }
+      const isBooked = !!mem.buyerName || mem.status === 'reserved' || mem.status === 'entered';
+      if (!isBooked) {
+        res.json({ success: true, valid: false, canEnter: false, ticket: mem, statusMessage: `Ticket ${mem.code} is unassigned.` });
+        return;
+      }
+      if (mem.entered) {
+        res.json({ success: true, valid: false, canEnter: false, ticket: mem, statusMessage: `ENTRY BLOCKED: Ticket ${mem.code} was ALREADY ENTERED.` });
+        return;
+      }
+      res.json({ success: true, valid: true, canEnter: true, ticket: mem, booking: { buyerName: mem.buyerName, phone: mem.buyerPhone }, statusMessage: `Valid Pass for ${mem.buyerName}.` });
       return;
     }
 
@@ -170,6 +212,27 @@ export const markEntered = async (req: Request, res: Response): Promise<void> =>
   }
 
   const ticketCode = code.toUpperCase().trim();
+
+  if (mongoose.connection.readyState !== 1) {
+    const mem = getMemoryTicketByCode(ticketCode);
+    if (!mem) {
+      res.status(404).json({ success: false, error: `Ticket ${ticketCode} not found.` });
+      return;
+    }
+    if (mem.entered) {
+      res.status(409).json({ success: false, error: `Already Entered at ${mem.enteredAt}. Do not admit.` });
+      return;
+    }
+    const updated = updateMemoryTicket(ticketCode, {
+      entered: true,
+      enteredAt: new Date().toISOString(),
+      entryCount: (mem.entryCount || 0) + 1,
+      status: 'entered'
+    });
+    res.json({ success: true, ticket: updated, message: `Ticket ${ticketCode} marked as entered successfully.` });
+    return;
+  }
+
   const reqId = requestId || (req.headers['x-request-id'] as string) || `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
   // Idempotency check: if already processed with same requestId, return cached result
@@ -337,6 +400,25 @@ export const correctStatus = async (req: Request, res: Response): Promise<void> 
     return;
   }
 
+  if (mongoose.connection.readyState !== 1) {
+    const mem = getMemoryTicketByCode(code);
+    if (!mem) {
+      res.status(404).json({ success: false, error: `Ticket ${code} not found.` });
+      return;
+    }
+    const updated = updateMemoryTicket(code, {
+      entered,
+      enteredAt: entered ? new Date().toISOString() : null,
+      status: entered ? 'entered' : (mem.buyerName ? 'reserved' : 'available')
+    });
+    res.status(200).json({
+      success: true,
+      ticket: updated,
+      message: `Entry status for ${code} corrected to ${entered ? 'Entered' : 'Not Entered'}.`
+    });
+    return;
+  }
+
   const performedByUser = {
     userId: req.user?.userId ? new mongoose.Types.ObjectId(req.user.userId) : undefined,
     name: req.user?.name || 'Event Manager',
@@ -429,6 +511,32 @@ export const clearTicket = async (req: Request, res: Response): Promise<void> =>
   }
   if (!confirmCode || confirmCode.trim().toUpperCase() !== code.trim().toUpperCase()) {
     res.status(400).json({ success: false, error: 'Exact ticket code confirmation mismatch.' });
+    return;
+  }
+
+  if (mongoose.connection.readyState !== 1) {
+    const mem = getMemoryTicketByCode(code);
+    if (!mem) {
+      res.status(404).json({ success: false, error: `Ticket ${code} not found.` });
+      return;
+    }
+    const updated = updateMemoryTicket(code, {
+      buyerName: '',
+      buyerPhone: '',
+      buyerEmail: '',
+      bookingCode: '',
+      paymentStatus: 'Pending',
+      totalAmount: 0,
+      status: 'available',
+      entered: false,
+      enteredAt: null,
+      entryCount: 0
+    });
+    res.status(200).json({
+      success: true,
+      ticket: updated,
+      message: `Ticket ${code} registration cleared.`
+    });
     return;
   }
 

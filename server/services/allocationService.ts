@@ -1,5 +1,6 @@
-import { ClientSession } from 'mongoose';
+import mongoose, { ClientSession } from 'mongoose';
 import { ITicket, Ticket } from '../models/Ticket';
+import { getMemoryTickets } from './inMemoryStore';
 
 export interface AllocationResult {
   success: boolean;
@@ -37,13 +38,19 @@ export async function findConsecutiveTickets(
     };
   }
 
-  // 1. Query all available tickets (status = 'available', bookingId = null) sorted by serialNumber ascending
-  const query = Ticket.find({ status: 'available', bookingId: null }).sort({ serialNumber: 1 });
-  if (session) {
-    query.session(session);
-  }
+  let availableTickets: ITicket[] = [];
 
-  const availableTickets = await query.exec();
+  try {
+    // 1. Query all available tickets (status = 'available', bookingId = null) sorted by serialNumber ascending
+    const query = Ticket.find({ status: 'available', bookingId: null }).sort({ serialNumber: 1 });
+    if (session) {
+      query.session(session);
+    }
+    availableTickets = await query.exec();
+  } catch {
+    // Fallback when MongoDB is disconnected or bufferCommands = false
+    availableTickets = getMemoryTickets().filter(t => t.status === 'available') as any;
+  }
 
   if (availableTickets.length < quantity) {
     return {
@@ -130,7 +137,12 @@ export async function previewAllocation(
   isConsecutive: boolean;
   availableTotal: number;
 }> {
-  const availableCount = await Ticket.countDocuments({ status: 'available', bookingId: null });
+  let availableCount = 0;
+  try {
+    availableCount = await Ticket.countDocuments({ status: 'available', bookingId: null });
+  } catch {
+    availableCount = getMemoryTickets().filter(t => t.status === 'available').length;
+  }
   const result = await findConsecutiveTickets(quantity, undefined, false, startCode);
 
   if (result.success && result.tickets.length > 0) {
