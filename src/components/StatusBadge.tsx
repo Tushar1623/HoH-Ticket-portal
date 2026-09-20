@@ -58,17 +58,25 @@ export const PaymentBadge: React.FC<PaymentBadgeProps> = ({ status, size = 'md' 
 interface EntryBadgeProps {
   entered: boolean;
   size?: 'sm' | 'md';
+  enteredAt?: string;
 }
 
-export const EntryBadge: React.FC<EntryBadgeProps> = ({ entered, size = 'md' }) => {
+export const EntryBadge: React.FC<EntryBadgeProps> = ({ entered, size = 'md', enteredAt }) => {
   const sizeClasses = size === 'sm' ? 'px-2 py-0.5 text-xs' : 'px-2.5 py-1 text-xs font-semibold';
 
   if (entered) {
     return (
-      <span className={`inline-flex items-center gap-1 rounded-full bg-hoh-burgundy/10 text-hoh-burgundy border border-hoh-burgundy/30 font-semibold ${sizeClasses}`}>
-        <CheckCircle2 className="w-3.5 h-3.5 text-hoh-burgundy" />
-        <span>Entered</span>
-      </span>
+      <div className="flex flex-col gap-0.5 items-start">
+        <span className={`inline-flex items-center gap-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 font-semibold ${sizeClasses}`}>
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+          <span>Entered</span>
+        </span>
+        {enteredAt && (
+          <span className="text-[10px] text-stone-500 font-mono pl-1">
+            {enteredAt.length > 19 ? enteredAt.slice(11, 16) : enteredAt}
+          </span>
+        )}
+      </div>
     );
   }
 
@@ -79,6 +87,7 @@ export const EntryBadge: React.FC<EntryBadgeProps> = ({ entered, size = 'md' }) 
     </span>
   );
 };
+
 
 interface TicketStatusBannerProps {
   status: TicketStatus;

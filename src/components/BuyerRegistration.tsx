@@ -1,11 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   User, Phone, Mail, Users, IndianRupee, FileText, CheckCircle, 
-  AlertTriangle, Save, RefreshCw, Sparkles, ArrowRight, Ticket, Calendar, MapPin 
+  AlertTriangle, Save, RefreshCw, Sparkles, ArrowRight, Ticket,
+  Layers, ShieldAlert, Check
 } from 'lucide-react';
 import { PaymentStatus, TicketRecord } from '../types/ticket';
-import { VALID_TICKET_CODES, validateBuyerForm, formatCurrency } from '../lib/ticketRules';
-import { PaymentBadge, EntryBadge } from './StatusBadge';
+import { VALID_TICKET_CODES, formatCurrency, canEditBuyer, calculateConsecutiveSeats } from '../lib/ticketRules';
+import { PaymentBadge } from './StatusBadge';
+import { apiClient } from '../lib/apiClient';
 
 interface BuyerRegistrationProps {
   tickets: Record<string, TicketRecord>;
@@ -23,16 +25,34 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
   staffRole
 }) => {
   const [code, setCode] = useState<string>(selectedCode);
+  const [quantity, setQuantity] = useState<number>(1);
   const [buyerName, setBuyerName] = useState<string>('');
   const [phone, setPhone] = useState<string>('');
   const [email, setEmail] = useState<string>('');
-  const [guests, setGuests] = useState<number>(1);
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('Paid');
-  const [amount, setAmount] = useState<number>(500);
+  const [pricePerTicket, setPricePerTicket] = useState<number>(500);
   const [notes, setNotes] = useState<string>('');
+  const [allowNonConsecutive, setAllowNonConsecutive] = useState<boolean>(false);
+
+  // Immediate synchronous calculation whenever code, quantity, tickets, or allowNonConsecutive changes
+  const localAllocation = useMemo(() => {
+    return calculateConsecutiveSeats(tickets, quantity, code, allowNonConsecutive);
+  }, [tickets, quantity, code, allowNonConsecutive]);
+
+  // Live Allocation Preview state
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  const [previewData, setPreviewData] = useState<{
+    success: boolean;
+    proposedCodes: string[];
+    message: string;
+    isConsecutive: boolean;
+    availableTotal: number;
+  } | null>(localAllocation);
 
   const [saving, setSaving] = useState<boolean>(false);
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string; bookedCodes?: string[]; bookingCode?: string } | null>(null);
+
+  const totalAmount = quantity * pricePerTicket;
 
   useEffect(() => {
     if (selectedCode && VALID_TICKET_CODES.includes(selectedCode)) {
@@ -40,72 +60,146 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
     }
   }, [selectedCode]);
 
+  // Synchronize previewData with local calculation immediately (0ms latency)
   useEffect(() => {
-    const existing = tickets[code];
-    if (existing && existing.buyerName) {
-      setBuyerName(existing.buyerName);
-      setPhone(existing.phone || '');
-      setEmail(existing.email || '');
-      setGuests(existing.guests || 1);
-      setPaymentStatus(existing.paymentStatus || 'Paid');
-      setAmount(existing.amount !== undefined ? existing.amount : 500);
-      setNotes(existing.notes || '');
-    } else {
-      setBuyerName('');
-      setPhone('');
-      setEmail('');
-      setGuests(1);
-      setPaymentStatus('Paid');
-      setAmount(500);
-      setNotes('');
+    setPreviewData(localAllocation);
+  }, [localAllocation]);
+
+  // If single ticket selected, populate form from existing ticket if registered
+  useEffect(() => {
+    if (quantity === 1) {
+      const existing = tickets[code];
+      if (existing && existing.buyerName) {
+        setBuyerName(existing.buyerName);
+        setPhone(existing.phone || '');
+        setEmail(existing.email || '');
+        setPaymentStatus(existing.paymentStatus || 'Paid');
+        setPricePerTicket(existing.amount !== undefined ? existing.amount : 500);
+        setNotes(existing.notes || '');
+      } else {
+        setBuyerName('');
+        setPhone('');
+        setEmail('');
+        setPaymentStatus('Paid');
+        setPricePerTicket(500);
+        setNotes('');
+      }
     }
     setFeedback(null);
-  }, [code, tickets]);
+  }, [code, quantity, tickets]);
+
+  // Fetch live consecutive allocation preview when quantity or starting seat changes
+  const fetchPreview = useCallback(async (qty: number, startCode: string) => {
+    if (qty <= 0 || qty > 10) return;
+    setPreviewLoading(true);
+    try {
+      const result = await apiClient.previewAllocation(qty, startCode);
+      if (result && result.proposedCodes && result.proposedCodes.length > 0) {
+        setPreviewData(result);
+      }
+    } catch {
+      // keep localAllocation
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPreview(quantity, code);
+  }, [quantity, code, fetchPreview]);
+
+  // The active list of proposed consecutive codes
+  const proposedCodes = useMemo(() => {
+    if (previewData && previewData.proposedCodes && previewData.proposedCodes.length > 0) {
+      return previewData.proposedCodes;
+    }
+    return localAllocation.proposedCodes;
+  }, [previewData, localAllocation]);
 
   const currentTicket = tickets[code];
-  const isExistingRegistration = Boolean(currentTicket && currentTicket.buyerName);
+  const isExistingSingle = quantity === 1 && Boolean(currentTicket && currentTicket.buyerName);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFeedback(null);
 
-    const validation = validateBuyerForm({
-      code,
-      buyerName,
-      phone,
-      guests,
-      paymentStatus
-    });
+    if (!canEditBuyer(staffRole)) {
+      setFeedback({ type: 'error', message: 'Unauthorized: Entry Staff cannot register or edit buyer details.' });
+      return;
+    }
 
-    if (!validation.valid) {
-      setFeedback({ type: 'error', message: validation.error || 'Please correct errors.' });
+    if (!buyerName.trim()) {
+      setFeedback({ type: 'error', message: 'Buyer full name is required.' });
+      return;
+    }
+
+    if (!phone.trim()) {
+      setFeedback({ type: 'error', message: 'Phone number is required.' });
       return;
     }
 
     setSaving(true);
     try {
-      const result = await onSave({
-        code,
-        buyerName: buyerName.trim(),
-        phone: phone.trim(),
-        email: email.trim(),
-        guests: Number(guests),
-        paymentStatus,
-        amount: Number(amount) || 0,
-        notes: notes.trim(),
-        updatedBy: staffRole
-      });
+      // 1. Single Ticket Update
+      if (quantity === 1 && isExistingSingle) {
+        const result = await onSave({
+          code,
+          buyerName: buyerName.trim(),
+          phone: phone.trim(),
+          email: email.trim(),
+          guests: 1,
+          paymentStatus,
+          amount: Number(pricePerTicket) || 0,
+          notes: notes.trim(),
+          updatedBy: staffRole
+        });
 
-      if (result.ok) {
-        setFeedback({
-          type: 'success',
-          message: result.message || `Ticket ${code} saved successfully!`
-        });
+        if (result.ok) {
+          setFeedback({
+            type: 'success',
+            message: result.message || `Ticket ${code} saved successfully!`
+          });
+        } else {
+          setFeedback({
+            type: 'error',
+            message: result.error || 'Failed to save ticket details.'
+          });
+        }
       } else {
-        setFeedback({
-          type: 'error',
-          message: result.error || 'Failed to save ticket details.'
+        // 2. Multi-Ticket or New Consecutive Booking
+        const bookingRes = await apiClient.createBooking({
+          buyerName: buyerName.trim(),
+          phone: phone.trim(),
+          email: email.trim() || undefined,
+          ticketQuantity: quantity,
+          startCode: code,
+          paymentStatus,
+          totalAmount,
+          notes: notes.trim() || undefined,
+          allowNonConsecutive
         });
+
+        if (bookingRes.ok && bookingRes.data) {
+          const booked = bookingRes.data.booking;
+          const assigned = bookingRes.data.tickets.map((t: any) => t.code);
+          setFeedback({
+            type: 'success',
+            message: `Booking created successfully for ${buyerName}!`,
+            bookedCodes: assigned,
+            bookingCode: booked.bookingCode
+          });
+          // Reset form fields
+          setBuyerName('');
+          setPhone('');
+          setEmail('');
+          setNotes('');
+          fetchPreview(quantity, code);
+        } else {
+          setFeedback({
+            type: 'error',
+            message: bookingRes.error || 'Sync Failed — no ticket change was saved.'
+          });
+        }
       }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -119,6 +213,7 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
     const nextAvailable = VALID_TICKET_CODES.find(c => !tickets[c] || !tickets[c].buyerName);
     if (nextAvailable) {
       setCode(nextAvailable);
+      setQuantity(1);
     }
   };
 
@@ -134,11 +229,11 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
             <h2 className="text-lg sm:text-xl font-serif font-bold text-hoh-burgundy flex items-center gap-2">
               <span>Box Office Buyer Registration</span>
               <span className="text-[11px] bg-hoh-gold/20 text-hoh-gold-dark font-sans font-semibold px-2 py-0.5 rounded-full border border-hoh-gold/40">
-                Sales Desk
+                MongoDB Atlas Engine
               </span>
             </h2>
             <p className="text-xs text-hoh-muted">
-              Register buyers, contact details, guest headcount, and payment collection for HOH001–HOH050.
+              Consecutive multi-ticket seat allocation & buyer registry for HOH001–HOH050.
             </p>
           </div>
         </div>
@@ -149,60 +244,195 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
           className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-hoh-burgundy bg-hoh-gold/20 hover:bg-hoh-gold/30 border border-hoh-gold/40 rounded-xl transition-colors shadow-sm self-start sm:self-auto"
         >
           <Sparkles className="w-4 h-4 text-hoh-gold-dark" />
-          <span>Pick Next Available Ticket</span>
+          <span>Pick Next Single Available</span>
         </button>
       </div>
 
       {/* Feedback Banner */}
       {feedback && (
         <div
-          className={`p-4 rounded-xl flex items-start gap-3 transition-all ${
+          className={`p-5 rounded-2xl flex flex-col gap-3 transition-all ${
             feedback.type === 'success'
-              ? 'bg-emerald-50 border-2 border-emerald-500 text-emerald-950 shadow-sm'
-              : 'bg-rose-50 border-2 border-rose-500 text-rose-950 shadow-sm'
+              ? 'bg-emerald-50 border-2 border-emerald-500 text-emerald-950 shadow-md'
+              : 'bg-rose-50 border-2 border-rose-500 text-rose-950 shadow-md'
           }`}
         >
-          {feedback.type === 'success' ? (
-            <CheckCircle className="w-5 h-5 text-emerald-600 mt-0.5 shrink-0" />
-          ) : (
-            <AlertTriangle className="w-5 h-5 text-rose-600 mt-0.5 shrink-0" />
-          )}
-          <div className="flex-1 text-sm font-bold">
-            {feedback.message}
+          <div className="flex items-start gap-3">
+            {feedback.type === 'success' ? (
+              <CheckCircle className="w-6 h-6 text-emerald-600 mt-0.5 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-6 h-6 text-rose-600 mt-0.5 shrink-0" />
+            )}
+            <div className="flex-1">
+              <div className="text-base font-bold">{feedback.message}</div>
+              {feedback.bookingCode && (
+                <div className="text-xs font-mono text-emerald-800 mt-1">
+                  Booking Reference: <strong>{feedback.bookingCode}</strong>
+                </div>
+              )}
+            </div>
           </div>
+
+          {feedback.bookedCodes && feedback.bookedCodes.length > 0 && (
+            <div className="mt-2 pt-3 border-t border-emerald-200">
+              <span className="text-xs font-bold text-emerald-900 block mb-2">
+                Assigned Ticket Passes (Each ticket must be scanned separately at the door):
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {feedback.bookedCodes.map((tc) => (
+                  <div
+                    key={tc}
+                    className="inline-flex items-center gap-2 px-3 py-1.5 bg-white border border-emerald-300 rounded-xl shadow-sm"
+                  >
+                    <span className="font-mono font-black text-sm text-hoh-burgundy">{tc}</span>
+                    <button
+                      type="button"
+                      onClick={() => onNavigateToCheckEntry(tc)}
+                      className="text-[11px] text-emerald-700 hover:text-emerald-900 font-bold underline flex items-center gap-0.5"
+                    >
+                      <span>Gate Pass</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Side: The Form (7 cols on lg) */}
+        {/* Left Side: The Form */}
         <div className="lg:col-span-7 space-y-6">
           <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 overflow-hidden">
-            {/* Ticket Selector Bar */}
-            <div className="bg-gradient-to-r from-[#2A0C13] via-[#541D2B] to-[#2A0C13] p-4 sm:p-5 text-white border-b border-hoh-gold/30">
-              <label htmlFor="ticket-code-select" className="block text-xs font-bold uppercase tracking-wider text-hoh-gold-light mb-1.5">
-                Choose Ticket Code *
-              </label>
-              <div className="relative">
-                <select
-                  id="ticket-code-select"
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  className="w-full bg-hoh-burgundy border-2 border-hoh-gold/60 rounded-xl px-4 py-2.5 text-white font-mono font-bold text-lg focus:outline-none focus:border-hoh-gold transition-colors appearance-none cursor-pointer"
-                >
-                  {VALID_TICKET_CODES.map((tCode) => {
-                    const t = tickets[tCode];
-                    const isReg = Boolean(t && t.buyerName);
-                    const isEnt = Boolean(t && t.entered);
-                    return (
-                      <option key={tCode} value={tCode} className="bg-stone-900 text-white font-sans py-1">
-                        {tCode} - {isEnt ? '✓ Entered' : isReg ? `Registered (${t.buyerName.slice(0, 15)})` : '★ Available'}
-                      </option>
-                    );
-                  })}
-                </select>
-                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-hoh-gold font-bold">
-                  ▼
+            {/* Quantity Selector & Mode Bar */}
+            <div className="bg-gradient-to-r from-[#2A0C13] via-[#541D2B] to-[#2A0C13] p-5 text-white border-b border-hoh-gold/30">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+                <label className="block text-xs font-bold uppercase tracking-wider text-hoh-gold-light flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-hoh-gold" />
+                  <span>Select Ticket Quantity (1 to 10 Seats) *</span>
+                </label>
+                
+                {/* Starting Seat Quick Picker */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-bold text-amber-200/90">Starting Seat:</span>
+                  <select
+                    value={code}
+                    onChange={(e) => setCode(e.target.value)}
+                    className="px-2.5 py-1 bg-black/60 border border-hoh-gold/60 rounded-lg text-xs font-mono font-bold text-hoh-gold focus:outline-none focus:border-hoh-gold cursor-pointer"
+                  >
+                    {VALID_TICKET_CODES.map((c) => {
+                      const t = tickets[c];
+                      const isBooked = Boolean(t && t.buyerName);
+                      return (
+                        <option key={c} value={c} className="bg-stone-900 text-white">
+                          {c} {isBooked ? '• Booked' : '• Available'}
+                        </option>
+                      );
+                    })}
+                  </select>
                 </div>
+              </div>
+
+              {/* Quantity Stepper & Buttons */}
+              <div className="flex flex-wrap items-center gap-2">
+                {[1, 2, 3, 4, 5, 6, 8, 10].map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => setQuantity(q)}
+                    className={`px-3 py-1.5 rounded-xl font-mono text-sm font-bold transition-all ${
+                      quantity === q
+                        ? 'bg-hoh-gold text-stone-900 shadow-gold-glow scale-105'
+                        : 'bg-white/10 hover:bg-white/20 text-white border border-white/20'
+                    }`}
+                  >
+                    {q} {q === 1 ? 'Seat' : 'Seats'}
+                  </button>
+                ))}
+              </div>
+
+              {/* Automatically Added & Selected Consecutive Seats Pills */}
+              {quantity >= 2 && proposedCodes.length > 0 && (
+                <div className="mt-3.5 p-3.5 bg-black/60 rounded-xl border border-hoh-gold/50 space-y-2.5 shadow-inner animate-fade-in">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-hoh-gold uppercase tracking-wider">
+                    <span className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-hoh-gold" />
+                      <span>Automatically Added & Selected ({proposedCodes.length} Consecutive Seats)</span>
+                    </span>
+                    <span className="text-emerald-400 font-mono text-[10px] bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-500/50">
+                      Sequential Block
+                    </span>
+                  </div>
+
+                  {/* Visual seat pills */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {proposedCodes.map((tc, idx) => (
+                      <div
+                        key={tc}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-hoh-gold/25 via-hoh-gold/15 to-transparent border border-hoh-gold/80 rounded-xl shadow-sm"
+                      >
+                        <span className="w-5 h-5 rounded-full bg-hoh-gold text-stone-950 text-[10px] font-black flex items-center justify-center shadow">
+                          {idx + 1}
+                        </span>
+                        <span className="font-mono font-black text-sm text-white tracking-wide">
+                          {tc}
+                        </span>
+                        <span className="text-[10px] text-amber-200/90 font-medium">
+                          {idx === 0 ? 'Start' : `+Seat ${idx + 1}`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <p className="text-[11px] text-amber-100/80">
+                    Booking <strong className="text-white">{quantity} Seats</strong> starting from <span className="font-mono font-bold text-hoh-gold">{proposedCodes[0]}</span> automatically added and selected: <span className="font-mono font-bold text-emerald-300">{proposedCodes.join(', ')}</span>.
+                  </p>
+                </div>
+              )}
+
+              {/* Live Consecutive Allocation Engine Preview Box */}
+              <div className="mt-3 p-3.5 bg-black/50 rounded-xl border border-hoh-gold/40 text-xs space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] uppercase tracking-wider text-hoh-gold font-bold">
+                  <span>Allocation Engine Status</span>
+                  {previewLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin text-hoh-gold" />}
+                </div>
+
+                {previewData && (
+                  <div>
+                    {previewData.success ? (
+                      <div className="text-emerald-300 font-medium flex items-center gap-2">
+                        <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <span>
+                          {proposedCodes.length} consecutive ticket{proposedCodes.length > 1 ? 's' : ''} ready: <strong>{proposedCodes.join(', ')}</strong>
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="text-amber-300 font-medium flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                          <span>{previewData.message}</span>
+                        </div>
+
+                        {/* Manager Override Checkbox */}
+                        {['manager', 'admin'].includes(staffRole) && (
+                          <label className="flex items-center gap-2 pt-2 border-t border-white/10 text-amber-200 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={allowNonConsecutive}
+                              onChange={(e) => setAllowNonConsecutive(e.target.checked)}
+                              className="w-4 h-4 text-hoh-burgundy rounded border-stone-300 focus:ring-hoh-gold"
+                            />
+                            <span className="font-bold flex items-center gap-1 text-[11px]">
+                              <ShieldAlert className="w-3.5 h-3.5 text-hoh-gold" />
+                              Manager Override: Allow non-consecutive seat allocation
+                            </span>
+                          </label>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -222,7 +452,7 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
                     onChange={(e) => setBuyerName(e.target.value)}
                     placeholder="e.g. Rohan Mehra"
                     required
-                    className="w-full px-4 py-2.5 rounded-xl border border-stone-300 focus:ring-2 focus:ring-hoh-burgundy/20 focus:border-hoh-burgundy text-hoh-text placeholder-stone-400 font-semibold text-sm transition-all"
+                    className="w-full px-4 py-2.5 rounded-xl border border-stone-300 focus:ring-2 focus:ring-hoh-burgundy/20 focus:border-hoh-burgundy text-hoh-text font-semibold text-sm transition-all"
                   />
                 </div>
 
@@ -259,42 +489,21 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
                   />
                 </div>
 
-                {/* Guests Count */}
+                {/* Price Per Ticket */}
                 <div>
-                  <label htmlFor="guests" className="block text-xs font-bold uppercase tracking-wider text-stone-700 mb-1 flex items-center gap-1.5">
-                    <Users className="w-4 h-4 text-hoh-burgundy" />
-                    <span>Guests (1 to 10) *</span>
+                  <label htmlFor="pricePerTicket" className="block text-xs font-bold uppercase tracking-wider text-stone-700 mb-1 flex items-center gap-1.5">
+                    <IndianRupee className="w-4 h-4 text-hoh-burgundy" />
+                    <span>Price Per Seat (₹)</span>
                   </label>
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center border border-stone-300 rounded-xl overflow-hidden shadow-sm">
-                      <button
-                        type="button"
-                        onClick={() => setGuests(Math.max(1, guests - 1))}
-                        className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold"
-                      >
-                        -
-                      </button>
-                      <input
-                        type="number"
-                        id="guests"
-                        min="1"
-                        max="10"
-                        value={guests}
-                        onChange={(e) => setGuests(parseInt(e.target.value) || 1)}
-                        className="w-14 py-2 text-center font-black text-base text-hoh-burgundy border-none focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setGuests(Math.min(10, guests + 1))}
-                        className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold"
-                      >
-                        +
-                      </button>
-                    </div>
-                    <span className="text-xs text-stone-500 font-medium">
-                      {guests === 1 ? '1 Seat' : `${guests} Seats`}
-                    </span>
-                  </div>
+                  <input
+                    type="number"
+                    id="pricePerTicket"
+                    min="0"
+                    step="50"
+                    value={pricePerTicket}
+                    onChange={(e) => setPricePerTicket(parseFloat(e.target.value) || 0)}
+                    className="w-full px-4 py-2.5 rounded-xl border border-stone-300 font-bold text-sm"
+                  />
                 </div>
 
                 {/* Payment Status */}
@@ -316,23 +525,13 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
                   </select>
                 </div>
 
-                {/* Amount */}
-                <div className="sm:col-span-2">
-                  <label htmlFor="amount" className="block text-xs font-bold uppercase tracking-wider text-stone-700 mb-1 flex items-center gap-1.5">
-                    <IndianRupee className="w-4 h-4 text-hoh-burgundy" />
-                    <span>Amount (INR ₹)</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 font-bold text-stone-500">₹</span>
-                    <input
-                      type="number"
-                      id="amount"
-                      min="0"
-                      step="50"
-                      value={amount}
-                      onChange={(e) => setAmount(parseFloat(e.target.value) || 0)}
-                      className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-stone-300 font-bold text-sm"
-                    />
+                {/* Total Summary */}
+                <div className="sm:col-span-2 p-3.5 bg-stone-50 border border-stone-200 rounded-xl flex items-center justify-between">
+                  <div className="text-xs text-stone-600 font-medium">
+                    Order Summary: <strong>{quantity} seat{quantity > 1 ? 's' : ''}</strong> × ₹{pricePerTicket}
+                  </div>
+                  <div className="text-lg font-mono font-black text-hoh-burgundy">
+                    Total: {formatCurrency(totalAmount)}
                   </div>
                 </div>
 
@@ -347,7 +546,7 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
                     rows={2}
                     value={notes}
                     onChange={(e) => setNotes(e.target.value)}
-                    placeholder="e.g. Front row VIP seating, booked via Instagram"
+                    placeholder="e.g. VIP seating row, booked via Instagram"
                     className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-sm placeholder-stone-400"
                   />
                 </div>
@@ -356,23 +555,29 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
               {/* Submit Buttons */}
               <div className="pt-4 border-t border-stone-200 flex items-center justify-between gap-3">
                 <span className="text-xs text-stone-500">
-                  {isExistingRegistration ? 'Updating existing buyer record.' : 'Creating new booking record.'}
+                  {quantity > 1 ? `Assigning ${quantity} consecutive tickets atomically.` : isExistingSingle ? 'Updating single ticket.' : 'Creating new booking.'}
                 </span>
 
                 <button
                   type="submit"
-                  disabled={saving}
+                  disabled={Boolean(saving || (quantity > 1 && previewData && !previewData.success && !allowNonConsecutive))}
                   className="px-6 py-3 bg-hoh-burgundy hover:bg-hoh-burgundy-light text-white font-bold text-sm rounded-xl shadow-theatre flex items-center gap-2 disabled:opacity-50"
                 >
                   {saving ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin text-hoh-gold" />
-                      <span>Saving...</span>
+                      <span>Reserving Tickets...</span>
                     </>
                   ) : (
                     <>
                       <Save className="w-4 h-4 text-hoh-gold" />
-                      <span>{isExistingRegistration ? 'Update Record' : 'Save Booking'}</span>
+                      <span>
+                        {quantity > 1 
+                          ? `Reserve ${quantity} Consecutive Tickets (${proposedCodes.join(' + ')})` 
+                          : isExistingSingle 
+                            ? 'Update Single Ticket' 
+                            : `Save Booking (${code})`}
+                      </span>
                     </>
                   )}
                 </button>
@@ -381,17 +586,16 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
           </div>
         </div>
 
-        {/* Right Side: Live Comedy Club Ticket Preview (5 cols on lg) */}
+        {/* Right Side: Live Ticket Pass Preview */}
         <div className="lg:col-span-5 space-y-5">
           <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 p-5">
             <h3 className="text-xs font-bold uppercase tracking-wider text-hoh-burgundy flex items-center gap-2 mb-3">
               <Ticket className="w-4 h-4 text-hoh-gold" />
-              <span>Live Admission Ticket Preview</span>
+              <span>Box Office Admission Pass Preview</span>
             </h3>
 
-            {/* Themed Ticket Stub Graphic */}
+            {/* Vintage Burgundy & Gold Ticket Graphic */}
             <div className="bg-gradient-to-b from-[#2A0C13] to-[#451622] text-white rounded-2xl p-5 border-2 border-hoh-gold/40 shadow-xl relative overflow-hidden">
-              {/* Corner Notches for Vintage Ticket Look */}
               <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-6 h-6 bg-white rounded-full border border-stone-300"></div>
               <div className="absolute -right-3 top-1/2 -translate-y-1/2 w-6 h-6 bg-white rounded-full border border-stone-300"></div>
 
@@ -408,7 +612,7 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
                     India's Biggest Stand-Up Hunt
                   </div>
                   <div className="text-[10px] text-amber-200/70">
-                    Venue Box Office Pass
+                    MongoDB Verified Pass
                   </div>
                 </div>
               </div>
@@ -417,8 +621,12 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <span className="text-[10px] text-stone-400 uppercase tracking-wider font-mono">Ticket Code</span>
-                    <div className="text-2xl font-mono font-black text-hoh-gold">{code}</div>
+                    <span className="text-[10px] text-stone-400 uppercase tracking-wider font-mono">
+                      {quantity > 1 ? `Allocated Block (${proposedCodes.length} Seats)` : 'Ticket Code'}
+                    </span>
+                    <div className="text-xl font-mono font-black text-hoh-gold">
+                      {proposedCodes.length > 0 ? proposedCodes.join(' + ') : code}
+                    </div>
                   </div>
                   <div className="text-right">
                     <span className="text-[10px] text-stone-400 uppercase tracking-wider font-mono">Status</span>
@@ -426,9 +634,26 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
                   </div>
                 </div>
 
+                {/* Individual Door Pass Badges for Multi-Ticket Orders */}
+                {proposedCodes.length > 1 && (
+                  <div className="p-2.5 bg-black/50 rounded-xl border border-white/10 space-y-1.5">
+                    <span className="text-[10px] text-stone-400 uppercase tracking-wider font-mono block">
+                      Assigned Door Passes:
+                    </span>
+                    <div className="grid grid-cols-2 gap-1.5 text-[11px] font-mono">
+                      {proposedCodes.map((tc, idx) => (
+                        <div key={tc} className="flex items-center justify-between text-emerald-300 bg-white/5 px-2.5 py-1 rounded-lg border border-white/10">
+                          <span className="text-stone-400 text-[10px]">Seat #{idx + 1}</span>
+                          <span className="font-bold text-white">{tc}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="p-3 bg-black/40 rounded-xl border border-white/10 space-y-1.5">
                   <div className="text-xs">
-                    <span className="text-stone-400 text-[11px]">Guest: </span>
+                    <span className="text-stone-400 text-[11px]">Buyer: </span>
                     <span className="font-bold text-white">{buyerName || 'Guest Name'}</span>
                   </div>
                   <div className="text-xs">
@@ -436,24 +661,16 @@ export const BuyerRegistration: React.FC<BuyerRegistrationProps> = ({
                     <span className="font-mono text-stone-200">{phone || '+91 —'}</span>
                   </div>
                   <div className="text-xs flex items-center justify-between pt-1 border-t border-white/10">
-                    <span className="text-stone-300 font-semibold">{guests} {guests === 1 ? 'Person' : 'People'} Admitted</span>
-                    <span className="font-mono font-bold text-hoh-gold">{formatCurrency(amount)}</span>
+                    <span className="text-stone-300 font-semibold">{quantity} {quantity === 1 ? 'Seat' : 'Seats'} Reserved</span>
+                    <span className="font-mono font-bold text-hoh-gold">{formatCurrency(totalAmount)}</span>
                   </div>
                 </div>
 
-                {/* QR Code thumbnail for this ticket */}
-                <div className="flex items-center justify-center pt-2">
-                  <div className="bg-white p-2 rounded-xl border border-stone-200 text-center shadow-sm">
-                    <img
-                      src={`/qr-codes/${code}.png`}
-                      alt={`QR Code ${code}`}
-                      onError={(e) => {
-                        (e.target as HTMLElement).style.display = 'none';
-                      }}
-                      className="w-20 h-20 object-contain mx-auto"
-                    />
-                    <span className="text-[9px] font-mono font-bold text-stone-700">{code}</span>
-                  </div>
+                {/* Notice that every ticket in group has independent QR code */}
+                <div className="p-2.5 bg-hoh-burgundy/80 rounded-xl border border-hoh-gold/30 text-center">
+                  <span className="text-[11px] text-hoh-gold-light font-medium block">
+                    ★ Each individual ticket gets its own unique QR payload for single-use gate entry.
+                  </span>
                 </div>
               </div>
             </div>

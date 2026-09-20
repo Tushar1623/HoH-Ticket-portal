@@ -1,87 +1,86 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Search, Download, Edit3, CheckCircle, Clock,
   Users, IndianRupee, ShieldCheck, Ticket, Filter, RefreshCw,
-  RotateCcw, Trash2, AlertTriangle, X, Check, Lock, Loader2, Info
+  RotateCcw, Trash2, AlertTriangle, X, Check, Lock, Loader2, Info, ArrowRight
 } from 'lucide-react';
-import { TicketRecord } from '../types/ticket';
-import { calculateSummary, sheetClient } from '../lib/sheetClient';
-import { formatCurrency, formatLocalTimestamp, VALID_TICKET_CODES } from '../lib/ticketRules';
+import { PrepareResetResult, StaffRole, TicketRecord } from '../types/ticket';
+import { calculateSummary, apiClient } from '../lib/apiClient';
+import { 
+  canClearTicket, 
+  canEditBuyer, 
+  canExportData, 
+  canRequestCorrection, 
+  canResetEvent, 
+  formatCurrency, 
+  formatLocalTimestamp, 
+  VALID_TICKET_CODES,
+  validateClearTicket,
+  validateConfirmReset,
+  validateEntryStatusCorrection,
+  validatePrepareReset
+} from '../lib/ticketRules';
 import { PaymentBadge, EntryBadge } from './StatusBadge';
 
 interface TicketRegisterProps {
   tickets: Record<string, TicketRecord>;
   onSelectTicketForEntry: (code: string) => void;
   onSelectTicketForEdit: (code: string) => void;
-  onSetEntryStatus?: (code: string, entered: boolean, reason?: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
   onRefreshData?: () => void;
+  staffRole?: StaffRole;
 }
 
 export const TicketRegister: React.FC<TicketRegisterProps> = ({
   tickets,
   onSelectTicketForEntry,
   onSelectTicketForEdit,
-  onSetEntryStatus,
-  onRefreshData
+  onRefreshData,
+  staffRole = 'manager'
 }) => {
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [filterType, setFilterType] = useState<'all' | 'registered' | 'available' | 'paid' | 'pending' | 'entered' | 'not-entered'>('all');
 
-  // Modals & Action States
-  const [entryToggleTicket, setEntryToggleTicket] = useState<TicketRecord | null>(null);
-  const [entryToggleReason, setEntryToggleReason] = useState<string>('');
+  // Modal A: Request Entry Status Correction
+  const [correctionTicket, setCorrectionTicket] = useState<TicketRecord | null>(null);
+  const [correctionReason, setCorrectionReason] = useState<string>('');
+  const [correctionCodeConfirm, setCorrectionCodeConfirm] = useState<string>('');
 
+  // Modal B: Clear Ticket Data
   const [clearTicketModalData, setClearTicketModalData] = useState<TicketRecord | null>(null);
   const [clearCodeConfirm, setClearCodeConfirm] = useState<string>('');
   const [clearReason, setClearReason] = useState<string>('');
+  const [clearScope, setClearScope] = useState<'single' | 'booking'>('single');
 
+  // Modal C: Two-Step Reset All Ticket Data
   const [resetAllModalOpen, setResetAllModalOpen] = useState<boolean>(false);
-  const [resetAllConfirmText, setResetAllConfirmText] = useState<string>('');
-  const [resetAllReason, setResetAllReason] = useState<string>('');
+  const [resetStep, setResetStep] = useState<'prepare' | 'confirm'>('prepare');
+  const [resetReason, setResetReason] = useState<string>('');
+  const [preparedResetData, setPreparedResetData] = useState<PrepareResetResult | null>(null);
+  const [resetCountdown, setResetCountdown] = useState<number>(300);
+  const [resetConfirmText, setResetConfirmText] = useState<string>('');
 
-  const [togglingCode, setTogglingCode] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
   const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // 1-Click Direct Entry Status Toggle (Instant access)
-  const handleDirectEntryToggle = async (ticket: TicketRecord) => {
-    if (togglingCode) return;
-    setTogglingCode(ticket.code);
-    setActionFeedback(null);
-
-    const targetEntered = !ticket.entered;
-    let res;
-
-    if (onSetEntryStatus) {
-      res = await onSetEntryStatus(
-        ticket.code,
-        targetEntered,
-        `Direct 1-click toggle to ${targetEntered ? 'Entered' : 'Not Entered'}`
-      );
-    } else {
-      res = await sheetClient.setEntryStatus(
-        ticket.code,
-        targetEntered,
-        `Direct 1-click toggle to ${targetEntered ? 'Entered' : 'Not Entered'}`,
-        'Ticket Register Staff'
-      );
+  // Countdown timer for prepared reset token
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (resetAllModalOpen && resetStep === 'confirm' && resetCountdown > 0) {
+      timer = setInterval(() => {
+        setResetCountdown(prev => {
+          if (prev <= 1) {
+            clearInterval(timer);
+            setPreparedResetData(null);
+            setResetStep('prepare');
+            setActionFeedback({ type: 'error', message: 'Reset token expired. Please prepare reset again.' });
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
     }
-
-    setTogglingCode(null);
-
-    if (res && res.ok) {
-      setActionFeedback({
-        type: 'success',
-        message: res.message || `Ticket ${ticket.code} directly marked as ${targetEntered ? 'Entered' : 'Not Entered'}.`
-      });
-      if (onRefreshData) onRefreshData();
-    } else {
-      setActionFeedback({
-        type: 'error',
-        message: res?.error || 'Failed to toggle entry status.'
-      });
-    }
-  };
+    return () => clearInterval(timer);
+  }, [resetAllModalOpen, resetStep, resetCountdown]);
 
   // Calculate live KPI counts
   const summary = useMemo(() => calculateSummary(tickets), [tickets]);
@@ -109,7 +108,7 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
       if (filterType === 'entered' && !ticket.entered) return false;
       if (filterType === 'not-entered' && (ticket.entered || !isReg)) return false;
 
-      // Search match (code, buyerName, phone, notes)
+      // Search match
       if (searchTerm.trim() !== '') {
         const query = searchTerm.toLowerCase().trim();
         const codeMatch = ticket.code.toLowerCase().includes(query);
@@ -124,8 +123,13 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
     });
   }, [tickets, filterType, searchTerm]);
 
-  // Export to CSV
+  // Export to CSV (Event Manager or Super Admin only)
   const handleExportCSV = () => {
+    if (!canExportData(staffRole)) {
+      setActionFeedback({ type: 'error', message: 'Unauthorized: Only Event Manager or Super Admin can export buyer data.' });
+      return;
+    }
+
     const headers = ['Code', 'Buyer Name', 'Phone', 'Email', 'Guests', 'Payment Status', 'Amount', 'Entered', 'Entered At', 'Notes'];
     const rows = VALID_TICKET_CODES.map(c => {
       const t = tickets[c];
@@ -153,66 +157,121 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
     document.body.removeChild(link);
   };
 
-  // Action 1: Toggle Entry Status
-  const handleConfirmEntryToggle = async (e: React.FormEvent) => {
+  // Safe Action A: Request Entry Status Correction
+  const handleConfirmCorrection = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!entryToggleTicket) return;
+    if (!correctionTicket) return;
 
-    const trimmedReason = entryToggleReason.trim();
-    if (!trimmedReason) {
-      setActionFeedback({ type: 'error', message: 'A reason is required to change entry status.' });
+    const targetEntered = !correctionTicket.entered;
+    const val = validateEntryStatusCorrection({
+      code: correctionTicket.code,
+      entered: targetEntered,
+      reason: correctionReason,
+      confirmCode: correctionCodeConfirm,
+      ticket: correctionTicket
+    });
+
+    if (!val.valid) {
+      setActionFeedback({ type: 'error', message: val.error || 'Validation failed.' });
       return;
     }
 
     setActionLoading(true);
     setActionFeedback(null);
 
-    const targetEntered = !entryToggleTicket.entered;
-    let res;
-    if (onSetEntryStatus) {
-      res = await onSetEntryStatus(entryToggleTicket.code, targetEntered, trimmedReason);
-    } else {
-      res = await sheetClient.setEntryStatus(
-        entryToggleTicket.code,
-        targetEntered,
-        trimmedReason,
-        'Ticket Register Desk'
-      );
-    }
+    const res = await apiClient.correctStatus({
+      code: correctionTicket.code,
+      entered: targetEntered,
+      reason: correctionReason.trim()
+    });
 
     setActionLoading(false);
 
     if (res.ok) {
       setActionFeedback({
         type: 'success',
-        message: res.message || `Ticket ${entryToggleTicket.code} marked as ${targetEntered ? 'Entered' : 'Not Entered'}.`
+        message: res.message || `Entry status for ${correctionTicket.code} updated to ${targetEntered ? 'Entered' : 'Not Entered'}.`
       });
-      setEntryToggleTicket(null);
-      setEntryToggleReason('');
+      setCorrectionTicket(null);
+      setCorrectionReason('');
+      setCorrectionCodeConfirm('');
       if (onRefreshData) onRefreshData();
     } else {
-      setActionFeedback({ type: 'error', message: res.error || 'Failed to update entry status.' });
+      setActionFeedback({
+        type: 'error',
+        message: res.error || 'Sync Failed — no change was saved.'
+      });
     }
   };
 
-  // Action 2: Clear One Ticket Data
+  // Safe Action B: Clear Ticket Data (or whole booking)
   const handleConfirmClearTicket = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!clearTicketModalData) return;
 
-    if (clearCodeConfirm.trim().toUpperCase() !== clearTicketModalData.code) {
-      setActionFeedback({ type: 'error', message: `Please type the exact code: ${clearTicketModalData.code}` });
+    if (clearScope === 'booking' && clearTicketModalData.bookingCode) {
+      const trimmedConfirm = clearCodeConfirm.trim().toUpperCase();
+      if (trimmedConfirm !== clearTicketModalData.bookingCode && trimmedConfirm !== clearTicketModalData.code) {
+        setActionFeedback({ 
+          type: 'error', 
+          message: `Confirmation code must match booking code "${clearTicketModalData.bookingCode}" or ticket code "${clearTicketModalData.code}".` 
+        });
+        return;
+      }
+
+      if (clearReason.trim().length < 10) {
+        setActionFeedback({ type: 'error', message: 'Reason must be at least 10 characters.' });
+        return;
+      }
+
+      setActionLoading(true);
+      setActionFeedback(null);
+
+      const res = await apiClient.clearBooking({
+        bookingCode: clearTicketModalData.bookingCode,
+        reason: clearReason.trim()
+      });
+
+      setActionLoading(false);
+
+      if (res.ok) {
+        setActionFeedback({
+          type: 'success',
+          message: res.message || `Booking ${clearTicketModalData.bookingCode} cleared successfully.`
+        });
+        setClearTicketModalData(null);
+        setClearCodeConfirm('');
+        setClearReason('');
+        setClearScope('single');
+        if (onRefreshData) onRefreshData();
+      } else {
+        setActionFeedback({
+          type: 'error',
+          message: res.error || 'Sync Failed — no change was saved.'
+        });
+      }
+      return;
+    }
+
+    const val = validateClearTicket({
+      code: clearTicketModalData.code,
+      reason: clearReason,
+      confirmCode: clearCodeConfirm
+    });
+
+    if (!val.valid) {
+      setActionFeedback({ type: 'error', message: val.error || 'Validation failed.' });
       return;
     }
 
     setActionLoading(true);
     setActionFeedback(null);
 
-    const res = await sheetClient.clearTicketData(
-      clearTicketModalData.code,
-      clearReason.trim() || 'Manual single-ticket clear',
-      'Ticket Register Reset'
-    );
+    const res = await apiClient.clearTicketData({
+      code: clearTicketModalData.code,
+      reason: clearReason.trim(),
+      confirmCode: clearCodeConfirm.trim()
+    });
 
     setActionLoading(false);
 
@@ -224,42 +283,91 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
       setClearTicketModalData(null);
       setClearCodeConfirm('');
       setClearReason('');
+      setClearScope('single');
       if (onRefreshData) onRefreshData();
     } else {
-      setActionFeedback({ type: 'error', message: res.error || 'Failed to clear ticket data.' });
+      setActionFeedback({
+        type: 'error',
+        message: res.error || 'Sync Failed — no change was saved.'
+      });
     }
   };
 
-  // Action 3: Reset All Ticket Data
-  const handleConfirmResetAll = async (e: React.FormEvent) => {
+  // Safe Action C Step 1: Prepare Reset
+  const handlePrepareResetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (resetAllConfirmText.trim() !== 'RESET HOH EVENT') {
-      setActionFeedback({ type: 'error', message: 'Confirmation mismatch. You must type RESET HOH EVENT.' });
+    const val = validatePrepareReset(resetReason);
+    if (!val.valid) {
+      setActionFeedback({ type: 'error', message: val.error || 'Reason must be at least 20 characters.' });
       return;
     }
 
     setActionLoading(true);
     setActionFeedback(null);
 
-    const res = await sheetClient.resetAllTicketData(
-      resetAllConfirmText.trim(),
-      resetAllReason.trim() || 'Full event data reset',
-      'Ticket Register Admin'
-    );
+    const res = await apiClient.prepareEventReset(resetReason.trim());
+    setActionLoading(false);
+
+    if (res.ok && res.data) {
+      setPreparedResetData({
+        resetToken: res.data.resetToken,
+        expiresInSeconds: 300,
+        registeredCount: summary.registered,
+        enteredCount: summary.entered
+      });
+      setResetCountdown(300);
+      setResetStep('confirm');
+      setResetConfirmText('');
+    } else {
+      setActionFeedback({
+        type: 'error',
+        message: res.error || 'Failed to prepare event reset. Super Admin authority required.'
+      });
+    }
+  };
+
+  // Safe Action C Step 2: Confirm Reset
+  const handleConfirmResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!preparedResetData) return;
+
+    const val = validateConfirmReset({
+      token: preparedResetData.resetToken,
+      confirmText: resetConfirmText
+    });
+
+    if (!val.valid) {
+      setActionFeedback({ type: 'error', message: val.error || 'You must type RESET HOH EVENT.' });
+      return;
+    }
+
+    setActionLoading(true);
+    setActionFeedback(null);
+
+    const res = await apiClient.confirmEventReset({
+      token: preparedResetData.resetToken,
+      confirmText: 'RESET-ALL-HOH-TICKETS-CONFIRM',
+      reason: resetReason.trim()
+    });
 
     setActionLoading(false);
 
     if (res.ok) {
       setActionFeedback({
         type: 'success',
-        message: res.message || 'All ticket data reset successfully. Backup created in Google Sheets!'
+        message: res.message || 'All 50 tickets successfully reset to available status. Backup snapshot saved to audit log.'
       });
       setResetAllModalOpen(false);
-      setResetAllConfirmText('');
-      setResetAllReason('');
+      setResetStep('prepare');
+      setPreparedResetData(null);
+      setResetReason('');
+      setResetConfirmText('');
       if (onRefreshData) onRefreshData();
     } else {
-      setActionFeedback({ type: 'error', message: res.error || 'Failed to reset all ticket data.' });
+      setActionFeedback({
+        type: 'error',
+        message: res.error || 'Sync Failed — no change was saved.'
+      });
     }
   };
 
@@ -275,7 +383,7 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
             </span>
           </h2>
           <p className="text-sm text-hoh-muted mt-0.5">
-            Full overview of all 50 House of Humour tickets, payments, door admission, and direct data controls.
+            Full overview of all 50 House of Humour tickets, payments, door admission, and protected data controls.
           </p>
         </div>
 
@@ -285,20 +393,22 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
               type="button"
               onClick={onRefreshData}
               className="p-2 bg-white text-stone-700 hover:text-hoh-burgundy border border-stone-300 rounded-xl transition-all shadow-sm"
-              title="Refresh tickets from Google Sheet / Storage"
+              title="Refresh tickets from MongoDB Atlas"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
           )}
 
-          <button
-            type="button"
-            onClick={handleExportCSV}
-            className="px-3.5 py-2 bg-white hover:bg-stone-50 text-hoh-burgundy border border-stone-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-colors"
-          >
-            <Download className="w-4 h-4 text-hoh-gold" />
-            <span>Export CSV</span>
-          </button>
+          {canExportData(staffRole) && (
+            <button
+              type="button"
+              onClick={handleExportCSV}
+              className="px-3.5 py-2 bg-white hover:bg-stone-50 text-hoh-burgundy border border-stone-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-colors"
+            >
+              <Download className="w-4 h-4 text-hoh-gold" />
+              <span>Export CSV</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -350,179 +460,156 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
           <div className="text-2xl font-bold font-mono text-emerald-700 mt-1">
             {summary.registered}
           </div>
-          <div className="text-[11px] text-stone-400 mt-0.5">{summary.totalGuests} Guests Headcount</div>
+          <div className="text-[11px] text-stone-400 mt-0.5">
+            {Math.round((summary.registered / summary.total) * 100)}% sold
+          </div>
         </div>
 
         {/* Available */}
         <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm">
           <div className="text-xs text-stone-500 font-medium flex items-center gap-1">
-            <Ticket className="w-3.5 h-3.5 text-stone-400" />
+            <RotateCcw className="w-3.5 h-3.5 text-amber-600" />
             <span>Available</span>
           </div>
-          <div className="text-2xl font-bold font-mono text-stone-700 mt-1">
+          <div className="text-2xl font-bold font-mono text-amber-700 mt-1">
             {summary.available}
           </div>
-          <div className="text-[11px] text-stone-400 mt-0.5">Unsold seats</div>
+          <div className="text-[11px] text-stone-400 mt-0.5">Ready for booking</div>
         </div>
 
-        {/* Venue Admitted */}
+        {/* Admitted / Entered */}
         <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm">
           <div className="text-xs text-stone-500 font-medium flex items-center gap-1">
-            <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Entered</span>
+            <CheckCircle className="w-3.5 h-3.5 text-blue-600" />
+            <span>Admitted</span>
           </div>
-          <div className="text-2xl font-bold font-mono text-emerald-800 mt-1">
+          <div className="text-2xl font-bold font-mono text-blue-700 mt-1">
             {summary.entered}
           </div>
-          <div className="text-[11px] text-stone-400 mt-0.5">Admitted at door</div>
+          <div className="text-[11px] text-stone-400 mt-0.5">Scanned at door</div>
         </div>
 
-        {/* Pending Admission */}
+        {/* Total Guests Expected */}
         <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm">
           <div className="text-xs text-stone-500 font-medium flex items-center gap-1">
-            <Clock className="w-3.5 h-3.5 text-amber-600" />
-            <span>Not Entered</span>
+            <Users className="w-3.5 h-3.5 text-purple-600" />
+            <span>Total Guests</span>
           </div>
-          <div className="text-2xl font-bold font-mono text-amber-800 mt-1">
-            {summary.notEntered}
+          <div className="text-2xl font-bold font-mono text-purple-700 mt-1">
+            {summary.totalGuests}
           </div>
-          <div className="text-[11px] text-stone-400 mt-0.5">Awaiting arrival</div>
+          <div className="text-[11px] text-stone-400 mt-0.5">Across bookings</div>
         </div>
 
-        {/* Total Revenue */}
+        {/* Total Collections */}
         <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm">
           <div className="text-xs text-stone-500 font-medium flex items-center gap-1">
-            <IndianRupee className="w-3.5 h-3.5 text-amber-600" />
-            <span>Collected</span>
+            <IndianRupee className="w-3.5 h-3.5 text-hoh-gold" />
+            <span>Collections</span>
           </div>
-          <div className="text-xl font-bold font-mono text-amber-900 mt-1 truncate">
+          <div className="text-2xl font-bold font-mono text-hoh-burgundy mt-1">
             {formatCurrency(summary.totalRevenue)}
           </div>
-          <div className="text-[11px] text-stone-400 mt-0.5">Paid bookings</div>
+          <div className="text-[11px] text-stone-400 mt-0.5">Paid receipts</div>
         </div>
       </div>
 
-      {/* Search & Filter Strip */}
-      <div className="bg-white p-4 rounded-2xl shadow-theatre border border-stone-200 space-y-3">
-        <div className="flex flex-col md:flex-row items-center gap-3">
-          {/* Search Box */}
-          <div className="relative w-full md:flex-1">
-            <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search code (HOH012), buyer name, phone number, notes..."
-              className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-stone-300 text-sm focus:border-hoh-burgundy focus:ring-1 focus:ring-hoh-burgundy text-hoh-text placeholder-stone-400"
-            />
-          </div>
-
-          {/* Quick Filter Buttons */}
-          <div className="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto pb-1 md:pb-0 no-scrollbar">
-            <span className="text-xs text-stone-400 flex items-center gap-1 pl-1">
-              <Filter className="w-3 h-3" />
-            </span>
-            <button
-              type="button"
-              onClick={() => setFilterType('all')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-                filterType === 'all'
-                  ? 'bg-hoh-burgundy text-white font-semibold'
-                  : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
-              }`}
-            >
-              All ({summary.total})
-            </button>
-            <button
-              type="button"
-              onClick={() => setFilterType('registered')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-                filterType === 'registered'
-                  ? 'bg-hoh-burgundy text-white font-semibold'
-                  : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
-              }`}
-            >
-              Registered ({summary.registered})
-            </button>
-            <button
-              type="button"
-              onClick={() => setFilterType('available')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-                filterType === 'available'
-                  ? 'bg-hoh-burgundy text-white font-semibold'
-                  : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
-              }`}
-            >
-              Available ({summary.available})
-            </button>
-            <button
-              type="button"
-              onClick={() => setFilterType('entered')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-                filterType === 'entered'
-                  ? 'bg-hoh-burgundy text-white font-semibold'
-                  : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
-              }`}
-            >
-              Entered ({summary.entered})
-            </button>
-          </div>
-        </div>
-
-        {/* Result count indicator */}
-        <div className="flex items-center justify-between text-xs text-stone-500 pt-1">
-          <span>Showing <strong>{filteredTickets.length}</strong> of 50 tickets</span>
+      {/* Filter and Search Bar */}
+      <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        {/* Search */}
+        <div className="relative flex-1 max-w-md">
+          <Search className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            placeholder="Search code (HOH001), buyer name, phone..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full pl-9 pr-4 py-2 text-xs sm:text-sm rounded-xl border border-stone-300 focus:border-hoh-burgundy focus:ring-1 focus:ring-hoh-burgundy text-hoh-text placeholder-stone-400"
+          />
           {searchTerm && (
             <button
               type="button"
               onClick={() => setSearchTerm('')}
-              className="text-hoh-burgundy underline hover:text-hoh-gold-dark"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
             >
-              Clear search
+              <X className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
+
+        {/* Filter Pills */}
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 sm:pb-0">
+          <Filter className="w-3.5 h-3.5 text-stone-400 hidden sm:inline" />
+          {[
+            { id: 'all', label: `All (${summary.total})` },
+            { id: 'registered', label: `Registered (${summary.registered})` },
+            { id: 'available', label: `Available (${summary.available})` },
+            { id: 'entered', label: `Entered (${summary.entered})` },
+            { id: 'not-entered', label: `Not Entered (${summary.notEntered})` },
+            { id: 'paid', label: 'Paid' },
+            { id: 'pending', label: 'Pending' }
+          ].map(f => (
+            <button
+              key={f.id}
+              onClick={() => setFilterType(f.id as any)}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all ${
+                filterType === f.id
+                  ? 'bg-hoh-burgundy text-white shadow-sm'
+                  : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* 50 Tickets Table */}
-      <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 overflow-hidden">
+      {/* Main Tickets Table */}
+      <div className="bg-white rounded-xl border border-stone-200 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="w-full text-left border-collapse text-xs sm:text-sm">
             <thead>
-              <tr className="bg-hoh-burgundy text-white text-xs uppercase tracking-wider font-semibold border-b border-hoh-gold/20">
-                <th className="py-3.5 px-4">Code</th>
-                <th className="py-3.5 px-4">Buyer Name</th>
-                <th className="py-3.5 px-4">Phone</th>
-                <th className="py-3.5 px-4 text-center">Guests</th>
-                <th className="py-3.5 px-4">Payment</th>
-                <th className="py-3.5 px-4">Amount</th>
-                <th className="py-3.5 px-4">Venue Entry</th>
-                <th className="py-3.5 px-4 text-right">Row Actions</th>
+              <tr className="bg-hoh-burgundy text-[#F7E7B4] text-xs font-serif font-semibold border-b border-hoh-gold/30">
+                <th className="py-3 px-4">Code</th>
+                <th className="py-3 px-4">Buyer Name</th>
+                <th className="py-3 px-4">Phone</th>
+                <th className="py-3 px-4 text-center">Guests</th>
+                <th className="py-3 px-4">Payment</th>
+                <th className="py-3 px-4">Amount</th>
+                <th className="py-3 px-4">Door Status</th>
+                <th className="py-3 px-4 text-right">Protected Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-stone-200 text-sm">
+            <tbody className="divide-y divide-stone-100 font-sans">
               {filteredTickets.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-stone-500">
-                    No tickets match the search query or filter.
+                  <td colSpan={8} className="text-center py-10 text-stone-400">
+                    No tickets found matching current filters.
                   </td>
                 </tr>
               ) : (
-                filteredTickets.map((t) => {
+                filteredTickets.map(t => {
                   const isReg = Boolean(t.buyerName && t.buyerName.trim() !== '');
 
                   return (
-                    <tr
-                      key={t.code}
-                      className={`hover:bg-hoh-warm/50 transition-colors ${
-                        t.entered ? 'bg-emerald-50/30' : ''
+                    <tr 
+                      key={t.code} 
+                      className={`hover:bg-stone-50/80 transition-colors ${
+                        t.entered ? 'bg-emerald-50/20' : ''
                       }`}
                     >
-                      {/* Ticket Code */}
+                      {/* Ticket Code & Booking Reference */}
                       <td className="py-3 px-4 font-mono font-bold text-hoh-burgundy">
-                        <span className="bg-hoh-burgundy/10 px-2 py-1 rounded text-xs">
-                          {t.code}
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="bg-hoh-burgundy/10 px-2 py-1 rounded text-xs">
+                            {t.code}
+                          </span>
+                          {t.bookingCode && (
+                            <span className="bg-hoh-gold/15 text-stone-700 font-mono text-[10px] px-1.5 py-0.5 rounded border border-hoh-gold/40" title={`Booking: ${t.bookingCode}`}>
+                              {t.bookingCode.replace('HOH-BOOK-', '#')}
+                            </span>
+                          )}
+                        </div>
                       </td>
 
                       {/* Buyer Name */}
@@ -573,109 +660,77 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
                         {isReg ? formatCurrency(t.amount) : '—'}
                       </td>
 
-                      {/* Entry Status (1-Click Direct Toggle Button) */}
+                      {/* Door Entry Status (Zero 1-Click Toggle: Pure Badge) */}
                       <td className="py-3 px-4">
-                        <div className="flex flex-col gap-1 items-start">
-                          <button
-                            type="button"
-                            onClick={() => handleDirectEntryToggle(t)}
-                            disabled={togglingCode === t.code}
-                            className={`group relative inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all shadow-sm active:scale-95 cursor-pointer ${
-                              t.entered
-                                ? 'bg-emerald-100 text-emerald-800 hover:bg-amber-100 hover:text-amber-900 border border-emerald-300 hover:border-amber-400'
-                                : 'bg-stone-100 text-stone-600 hover:bg-emerald-100 hover:text-emerald-900 border border-stone-300 hover:border-emerald-400'
-                            } disabled:opacity-50 disabled:cursor-not-allowed`}
-                            title={t.entered ? "Click to directly mark as Not Entered" : "Click to directly mark as Entered"}
-                          >
-                            {togglingCode === t.code ? (
-                              <>
-                                <Loader2 className="w-3.5 h-3.5 animate-spin text-hoh-burgundy" />
-                                <span>Updating...</span>
-                              </>
-                            ) : t.entered ? (
-                              <>
-                                <CheckCircle className="w-3.5 h-3.5 text-emerald-600 group-hover:hidden" />
-                                <RotateCcw className="w-3.5 h-3.5 text-amber-700 hidden group-hover:inline" />
-                                <span className="group-hover:hidden">Entered</span>
-                                <span className="hidden group-hover:inline">Mark Not Entered</span>
-                              </>
-                            ) : (
-                              <>
-                                <Clock className="w-3.5 h-3.5 text-stone-400 group-hover:hidden" />
-                                <CheckCircle className="w-3.5 h-3.5 text-emerald-600 hidden group-hover:inline" />
-                                <span className="group-hover:hidden">Not Entered</span>
-                                <span className="hidden group-hover:inline">Mark Entered</span>
-                              </>
-                            )}
-                          </button>
-                          {t.entered && t.enteredAt && (
-                            <div className="text-[11px] text-stone-500 flex items-center gap-1 font-mono pl-1">
-                              <Clock className="w-3 h-3 text-stone-400" />
-                              {formatLocalTimestamp(t.enteredAt)}
-                            </div>
-                          )}
-                        </div>
+                        <EntryBadge entered={t.entered} enteredAt={t.enteredAt} />
                       </td>
 
-                      {/* Row Actions */}
+                      {/* Row Actions: 4 Protected Safe Actions */}
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-1">
                           {/* 1. Verify at Gate */}
                           <button
                             type="button"
                             onClick={() => onSelectTicketForEntry(t.code)}
-                            className="p-1.5 text-hoh-burgundy hover:bg-hoh-burgundy/10 rounded-lg transition-colors"
-                            title="Verify & Scan at Gate"
+                            className="p-1.5 text-hoh-burgundy hover:bg-hoh-burgundy/10 rounded-lg transition-colors cursor-pointer"
+                            title="Verify at Gate"
                           >
                             <ShieldCheck className="w-4 h-4 text-hoh-burgundy" />
                           </button>
 
-                          {/* 2. Edit Registration */}
-                          <button
-                            type="button"
-                            onClick={() => onSelectTicketForEdit(t.code)}
-                            className="p-1.5 text-stone-600 hover:text-hoh-burgundy hover:bg-stone-100 rounded-lg transition-colors"
-                            title="Edit or register buyer"
-                          >
-                            <Edit3 className="w-4 h-4" />
-                          </button>
+                          {/* 2. Edit Buyer Details */}
+                          {canEditBuyer(staffRole) && (
+                            <button
+                              type="button"
+                              onClick={() => onSelectTicketForEdit(t.code)}
+                              className="p-1.5 text-stone-600 hover:text-hoh-burgundy hover:bg-stone-100 rounded-lg transition-colors cursor-pointer"
+                              title="Edit Buyer Details"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                          )}
 
-                          {/* 3. Manual Entry Status Toggle */}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEntryToggleTicket(t);
-                              setEntryToggleReason('');
-                              setActionFeedback(null);
-                            }}
-                            className={`p-1.5 rounded-lg transition-colors ${
-                              t.entered
-                                ? 'text-amber-700 hover:bg-amber-100 hover:text-amber-900'
-                                : 'text-emerald-700 hover:bg-emerald-100 hover:text-emerald-900'
-                            }`}
-                            title={t.entered ? 'Mark Not Entered' : 'Mark Entered'}
-                          >
-                            {t.entered ? (
-                              <RotateCcw className="w-4 h-4" />
-                            ) : (
-                              <CheckCircle className="w-4 h-4" />
-                            )}
-                          </button>
+                          {/* 3. Request Entry Status Correction */}
+                          {canRequestCorrection(staffRole) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCorrectionTicket(t);
+                                setCorrectionReason('');
+                                setCorrectionCodeConfirm('');
+                                setActionFeedback(null);
+                              }}
+                              className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                                t.entered
+                                  ? 'text-amber-700 hover:bg-amber-100 hover:text-amber-900'
+                                  : 'text-emerald-700 hover:bg-emerald-100 hover:text-emerald-900'
+                              }`}
+                              title="Request Entry Status Correction"
+                            >
+                              {t.entered ? (
+                                <RotateCcw className="w-4 h-4" />
+                              ) : (
+                                <CheckCircle className="w-4 h-4" />
+                              )}
+                            </button>
+                          )}
 
                           {/* 4. Clear Ticket Data */}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setClearTicketModalData(t);
-                              setClearCodeConfirm('');
-                              setClearReason('');
-                              setActionFeedback(null);
-                            }}
-                            className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
-                            title="Clear ticket data"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          {canClearTicket(staffRole) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setClearTicketModalData(t);
+                                setClearCodeConfirm('');
+                                setClearReason('');
+                                setActionFeedback(null);
+                              }}
+                              className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                              title="Clear Ticket Data"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -687,153 +742,179 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
         </div>
       </div>
 
-      {/* Danger Zone: Reset All Ticket Data (Bottom of page) */}
-      <div className="bg-gradient-to-r from-rose-50 via-white to-amber-50 rounded-2xl border border-rose-200 p-5 shadow-sm">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="p-2.5 bg-rose-100 text-rose-700 rounded-xl mt-0.5">
-              <AlertTriangle className="w-5 h-5" />
-            </div>
+      {/* Bottom Danger Zone: Two-Step Reset All Ticket Data (Super Admin Only) */}
+      {canResetEvent(staffRole) && (
+        <div className="bg-white rounded-2xl border border-rose-200 p-6 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
-              <h3 className="text-base font-bold text-rose-900 flex items-center gap-2">
+              <h3 className="text-lg font-serif font-bold text-rose-900 flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-rose-600" />
                 <span>Reset All Ticket Data</span>
-                <span className="text-[11px] font-mono px-2 py-0.5 bg-rose-200/70 text-rose-800 rounded-full font-semibold">
-                  Event Reset
-                </span>
               </h3>
-              <p className="text-xs text-stone-600 mt-1 max-w-2xl leading-relaxed">
-                Clears all buyer registrations, guest headcounts, payment records, and admission timestamps across all 50 tickets (<span className="font-mono font-bold">HOH001–HOH050</span>). An automated Google Sheet backup tab (<span className="font-mono bg-stone-100 px-1 py-0.5 rounded text-stone-700">Backup_YYYY-MM-DD_HH-mm</span>) will be created prior to clearing.
+              <p className="text-xs text-stone-600 mt-1">
+                Protected two-step Super Admin workflow with automatic MongoDB backup snapshot and 10-minute cooldown.
               </p>
             </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setResetAllModalOpen(true);
+                setResetStep('prepare');
+                setPreparedResetData(null);
+                setResetReason('');
+                setResetConfirmText('');
+                setActionFeedback(null);
+              }}
+              className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-sm transition-all flex items-center gap-2 cursor-pointer self-start sm:self-auto"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>Reset All Ticket Data</span>
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setResetAllModalOpen(true);
-              setResetAllConfirmText('');
-              setResetAllReason('');
-              setActionFeedback(null);
-            }}
-            className="px-4 py-2.5 bg-rose-700 hover:bg-rose-800 text-white rounded-xl text-xs font-bold shadow-md hover:shadow-lg transition-all flex items-center gap-2 whitespace-nowrap self-stretch sm:self-auto justify-center"
-          >
-            <Trash2 className="w-4 h-4" />
-            <span>Reset All Ticket Data</span>
-          </button>
         </div>
-      </div>
+      )}
 
       {/* ========================================================================= */}
-      {/* MODAL 1: Entry Status Toggle Confirmation */}
+      {/* MODAL A: Request Entry Status Correction */}
       {/* ========================================================================= */}
-      {entryToggleTicket && (
+      {correctionTicket && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-sm animate-fade-in">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-stone-200 space-y-4">
             <div className="flex items-center justify-between pb-2 border-b border-stone-100">
               <h3 className="text-lg font-serif font-bold text-hoh-burgundy flex items-center gap-2">
-                <Ticket className="w-5 h-5 text-hoh-gold" />
-                <span>Confirm Entry Status Change</span>
+                <RotateCcw className="w-5 h-5 text-hoh-gold" />
+                <span>Request Entry Status Correction</span>
               </h3>
               <button
                 type="button"
-                onClick={() => setEntryToggleTicket(null)}
+                onClick={() => setCorrectionTicket(null)}
                 disabled={actionLoading}
-                className="p-1 text-stone-400 hover:text-stone-700 rounded-lg"
+                className="p-1 text-stone-400 hover:text-stone-700 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="space-y-3">
+            <form onSubmit={handleConfirmCorrection} className="space-y-3">
+              {/* Ticket Details Box */}
               <div className="bg-stone-50 p-3.5 rounded-xl border border-stone-200 text-xs space-y-2">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center">
                   <span className="text-stone-500 font-medium">Ticket Code:</span>
-                  <span className="font-mono font-bold text-hoh-burgundy">{entryToggleTicket.code}</span>
+                  <span className="font-mono font-bold text-hoh-burgundy text-sm">{correctionTicket.code}</span>
                 </div>
-                {entryToggleTicket.buyerName && (
-                  <div className="flex justify-between">
-                    <span className="text-stone-500 font-medium">Buyer:</span>
-                    <span className="font-semibold text-stone-800">{entryToggleTicket.buyerName}</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-stone-500 font-medium">Buyer Name:</span>
+                  <span className="font-semibold text-stone-800">{correctionTicket.buyerName || 'Unregistered'}</span>
+                </div>
+                {correctionTicket.enteredAt && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-stone-500 font-medium">First Entry Timestamp:</span>
+                    <span className="font-mono text-stone-700">{formatLocalTimestamp(correctionTicket.enteredAt)}</span>
                   </div>
                 )}
-                <div className="flex justify-between items-center pt-1 border-t border-stone-200">
-                  <span className="text-stone-500 font-medium">Status Change:</span>
+                <div className="flex justify-between items-center pt-2 border-t border-stone-200">
+                  <span className="text-stone-500 font-medium">Status Transition:</span>
                   <div className="flex items-center gap-2">
                     <span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                      entryToggleTicket.entered ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
+                      correctionTicket.entered ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
                     }`}>
-                      {entryToggleTicket.entered ? 'Entered' : 'Not Entered'}
+                      {correctionTicket.entered ? 'Entered' : 'Not Entered'}
                     </span>
-                    <span className="text-stone-400">➔</span>
+                    <span className="text-stone-400 font-bold">➔</span>
                     <span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                      !entryToggleTicket.entered ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                      !correctionTicket.entered ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
                     }`}>
-                      {!entryToggleTicket.entered ? 'Entered' : 'Not Entered'}
+                      {!correctionTicket.entered ? 'Entered' : 'Not Entered'}
                     </span>
                   </div>
                 </div>
               </div>
 
               {/* Exact Warning Requirement when changing Entered -> Not Entered */}
-              {entryToggleTicket.entered && (
-                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2.5 text-xs text-amber-900">
+              {correctionTicket.entered && (
+                <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-2.5 text-xs text-amber-900">
                   <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
                   <p className="font-medium leading-relaxed">
-                    This ticket can be used again after this change.
+                    This allows the QR ticket to be used again. Confirm only after venue-manager approval.
                   </p>
                 </div>
               )}
 
-              {/* Mandatory Reason Input */}
-              <div className="space-y-1.5">
+              {/* Exact Ticket Code Confirmation Field */}
+              <div className="space-y-1">
                 <label className="block text-xs font-semibold text-stone-700">
-                  Reason for Manual Change <span className="text-rose-600">*</span>
+                  Type <span className="font-mono font-bold text-hoh-burgundy">{correctionTicket.code}</span> to confirm <span className="text-rose-600">*</span>:
                 </label>
+                <input
+                  type="text"
+                  value={correctionCodeConfirm}
+                  onChange={(e) => setCorrectionCodeConfirm(e.target.value)}
+                  placeholder={`e.g. ${correctionTicket.code}`}
+                  className="w-full px-3 py-2 text-xs font-mono uppercase rounded-xl border border-stone-300 focus:border-hoh-burgundy focus:ring-1 focus:ring-hoh-burgundy"
+                  required
+                />
+              </div>
+
+              {/* Mandatory Reason Field (min 10 characters) */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-xs">
+                  <label className="font-semibold text-stone-700">
+                    Required Reason (minimum 10 characters) <span className="text-rose-600">*</span>
+                  </label>
+                  <span className={`text-[11px] font-mono ${
+                    correctionReason.trim().length >= 10 ? 'text-emerald-600' : 'text-stone-400'
+                  }`}>
+                    {correctionReason.trim().length}/10 chars
+                  </span>
+                </div>
                 <textarea
                   rows={2}
-                  value={entryToggleReason}
-                  onChange={(e) => setEntryToggleReason(e.target.value)}
-                  placeholder="e.g. Guest stepped out temporarily / Correction by box office"
+                  value={correctionReason}
+                  onChange={(e) => setCorrectionReason(e.target.value)}
+                  placeholder="e.g. Guest stepped out with venue manager consent / accidental scan"
                   className="w-full px-3 py-2 text-xs rounded-xl border border-stone-300 focus:border-hoh-burgundy focus:ring-1 focus:ring-hoh-burgundy text-hoh-text placeholder-stone-400"
                   required
                 />
                 <p className="text-[11px] text-stone-400">
-                  This reason will be permanently recorded in the Google Sheet Audit Log.
+                  This action is permanently logged in the MongoDB Audit Log.
                 </p>
               </div>
-            </div>
 
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-100">
-              <button
-                type="button"
-                onClick={() => setEntryToggleTicket(null)}
-                disabled={actionLoading}
-                className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-xl transition-colors"
-              >
-                Cancel
-              </button>
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-100">
+                <button
+                  type="button"
+                  onClick={() => setCorrectionTicket(null)}
+                  disabled={actionLoading}
+                  className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-xl transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
 
-              <button
-                type="button"
-                onClick={handleConfirmEntryToggle}
-                disabled={actionLoading || !entryToggleReason.trim()}
-                className={`px-4 py-2 text-xs font-bold text-white rounded-xl shadow transition-all flex items-center gap-1.5 ${
-                  !entryToggleTicket.entered
-                    ? 'bg-emerald-700 hover:bg-emerald-800'
-                    : 'bg-amber-700 hover:bg-amber-800'
-                } disabled:opacity-50 disabled:cursor-not-allowed`}
-              >
-                {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>
-                  {entryToggleTicket.entered ? 'Mark Not Entered' : 'Mark Entered'}
-                </span>
-              </button>
-            </div>
+                <button
+                  type="submit"
+                  disabled={
+                    actionLoading ||
+                    correctionCodeConfirm.trim().toUpperCase() !== correctionTicket.code ||
+                    correctionReason.trim().length < 10
+                  }
+                  className={`px-4 py-2 text-xs font-bold text-white rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer ${
+                    !correctionTicket.entered
+                      ? 'bg-emerald-700 hover:bg-emerald-800'
+                      : 'bg-amber-700 hover:bg-amber-800'
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>{correctionTicket.entered ? 'Confirm Not Entered' : 'Confirm Entered'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 2: Clear One Ticket Data Confirmation */}
+      {/* MODAL B: Clear Ticket Data */}
       {/* ========================================================================= */}
       {clearTicketModalData && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-sm animate-fade-in">
@@ -847,77 +928,160 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
                 type="button"
                 onClick={() => setClearTicketModalData(null)}
                 disabled={actionLoading}
-                className="p-1 text-stone-400 hover:text-stone-700 rounded-lg"
+                className="p-1 text-stone-400 hover:text-stone-700 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="space-y-3">
-              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-1.5">
-                <p className="font-semibold">
-                  You are about to clear all buyer and admission data for ticket <span className="font-mono font-bold text-rose-950 underline">{clearTicketModalData.code}</span>.
-                </p>
-                <p className="text-[11px] text-rose-700 leading-relaxed">
-                  The row will not be deleted, and Code & QR Payload will remain unchanged. Buyer name, phone, email, guests, payment status, and entry status will be reset.
+            <form onSubmit={handleConfirmClearTicket} className="space-y-3">
+              {/* Scope Selector if ticket belongs to a multi-ticket or single-ticket booking */}
+              {clearTicketModalData.bookingCode && (
+                <div className="flex rounded-xl bg-stone-100 p-1 text-xs font-semibold">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClearScope('single');
+                      setClearCodeConfirm('');
+                    }}
+                    className={`flex-1 py-1.5 rounded-lg transition-all ${
+                      clearScope === 'single'
+                        ? 'bg-white text-stone-900 shadow-sm'
+                        : 'text-stone-500 hover:text-stone-800'
+                    }`}
+                  >
+                    This Ticket Only ({clearTicketModalData.code})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClearScope('booking');
+                      setClearCodeConfirm('');
+                    }}
+                    className={`flex-1 py-1.5 rounded-lg transition-all ${
+                      clearScope === 'booking'
+                        ? 'bg-rose-600 text-white shadow-sm'
+                        : 'text-stone-500 hover:text-stone-800'
+                    }`}
+                  >
+                    Entire Booking ({clearTicketModalData.bookingCode.replace('HOH-BOOK-', '#')})
+                  </button>
+                </div>
+              )}
+
+              {/* Ticket Details & Current Buyer */}
+              <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl text-xs space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-stone-500 font-medium">Ticket Code:</span>
+                  <span className="font-mono font-bold text-rose-950">{clearTicketModalData.code}</span>
+                </div>
+                {clearTicketModalData.bookingCode && (
+                  <div className="flex justify-between">
+                    <span className="text-stone-500 font-medium">Booking Code:</span>
+                    <span className="font-mono font-bold text-hoh-burgundy">{clearTicketModalData.bookingCode}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-stone-500 font-medium">Current Buyer:</span>
+                  <span className="font-semibold text-stone-800">{clearTicketModalData.buyerName || 'Unregistered'}</span>
+                </div>
+              </div>
+
+              {/* Exact Warning Requirement */}
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                <p className="font-medium leading-relaxed">
+                  {clearScope === 'booking' && clearTicketModalData.bookingCode
+                    ? `This will release ALL tickets assigned to order ${clearTicketModalData.bookingCode} back to the available pool. Ticket codes & serials remain permanent.`
+                    : 'This will remove buyer, payment, and entry details. Code and QR payload will remain.'}
                 </p>
               </div>
 
-              {/* Exact Ticket Code Typing Confirmation */}
-              <div className="space-y-1.5">
+              {/* Exact Ticket / Booking Code Typing Confirmation */}
+              <div className="space-y-1">
                 <label className="block text-xs font-semibold text-stone-700">
-                  Type <span className="font-mono font-bold text-rose-700">{clearTicketModalData.code}</span> to confirm:
+                  {clearScope === 'booking' && clearTicketModalData.bookingCode ? (
+                    <>
+                      Type <span className="font-mono font-bold text-rose-700">{clearTicketModalData.bookingCode}</span> or <span className="font-mono font-bold text-rose-700">{clearTicketModalData.code}</span> to confirm <span className="text-rose-600">*</span>:
+                    </>
+                  ) : (
+                    <>
+                      Type <span className="font-mono font-bold text-rose-700">{clearTicketModalData.code}</span> to confirm <span className="text-rose-600">*</span>:
+                    </>
+                  )}
                 </label>
                 <input
                   type="text"
                   value={clearCodeConfirm}
                   onChange={(e) => setClearCodeConfirm(e.target.value)}
-                  placeholder={`e.g. ${clearTicketModalData.code}`}
+                  placeholder={clearScope === 'booking' && clearTicketModalData.bookingCode ? `e.g. ${clearTicketModalData.bookingCode}` : `e.g. ${clearTicketModalData.code}`}
                   className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-stone-300 focus:border-rose-600 focus:ring-1 focus:ring-rose-600 uppercase"
+                  required
                 />
               </div>
 
-              {/* Reason Field */}
-              <div className="space-y-1.5">
-                <label className="block text-xs font-semibold text-stone-700">
-                  Reason for Clearing (Logged to Audit Log)
-                </label>
-                <input
-                  type="text"
+              {/* Mandatory Reason Field (min 10 characters) */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-xs">
+                  <label className="font-semibold text-stone-700">
+                    Required Reason (minimum 10 characters) <span className="text-rose-600">*</span>
+                  </label>
+                  <span className={`text-[11px] font-mono ${
+                    clearReason.trim().length >= 10 ? 'text-emerald-600' : 'text-stone-400'
+                  }`}>
+                    {clearReason.trim().length}/10 chars
+                  </span>
+                </div>
+                <textarea
+                  rows={2}
                   value={clearReason}
                   onChange={(e) => setClearReason(e.target.value)}
-                  placeholder="e.g. Cancellation requested by buyer"
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-stone-300 focus:border-rose-600 focus:ring-1 focus:ring-rose-600 text-hoh-text"
+                  placeholder="e.g. Buyer cancelled order / ticket released back to pool"
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-stone-300 focus:border-rose-600 focus:ring-1 focus:ring-rose-600 text-hoh-text placeholder-stone-400"
+                  required
                 />
               </div>
-            </div>
 
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-100">
-              <button
-                type="button"
-                onClick={() => setClearTicketModalData(null)}
-                disabled={actionLoading}
-                className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-xl transition-colors"
-              >
-                Cancel
-              </button>
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setClearTicketModalData(null);
+                    setClearScope('single');
+                  }}
+                  disabled={actionLoading}
+                  className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-xl transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
 
-              <button
-                type="button"
-                onClick={handleConfirmClearTicket}
-                disabled={actionLoading || clearCodeConfirm.trim().toUpperCase() !== clearTicketModalData.code}
-                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>Clear Ticket Data</span>
-              </button>
-            </div>
+                <button
+                  type="submit"
+                  disabled={
+                    actionLoading ||
+                    clearReason.trim().length < 10 ||
+                    (clearScope === 'booking' && clearTicketModalData.bookingCode
+                      ? clearCodeConfirm.trim().toUpperCase() !== clearTicketModalData.bookingCode &&
+                        clearCodeConfirm.trim().toUpperCase() !== clearTicketModalData.code
+                      : clearCodeConfirm.trim().toUpperCase() !== clearTicketModalData.code)
+                  }
+                  className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>
+                    {clearScope === 'booking' && clearTicketModalData.bookingCode
+                      ? 'Clear Entire Booking'
+                      : 'Clear Ticket Data'}
+                  </span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 3: Reset All Ticket Data Confirmation */}
+      {/* MODAL C: Reset All Ticket Data (Two-Step Workflow) */}
       {/* ========================================================================= */}
       {resetAllModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-sm animate-fade-in">
@@ -925,86 +1089,140 @@ export const TicketRegister: React.FC<TicketRegisterProps> = ({
             <div className="flex items-center justify-between pb-2 border-b border-rose-100">
               <h3 className="text-lg font-serif font-bold text-rose-900 flex items-center gap-2">
                 <AlertTriangle className="w-5 h-5 text-rose-600" />
-                <span>Reset All 50 Tickets</span>
+                <span>Reset All 50 Tickets — Step {resetStep === 'prepare' ? '1 of 2' : '2 of 2'}</span>
               </h3>
               <button
                 type="button"
                 onClick={() => setResetAllModalOpen(false)}
                 disabled={actionLoading}
-                className="p-1 text-stone-400 hover:text-stone-700 rounded-lg"
+                className="p-1 text-stone-400 hover:text-stone-700 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="space-y-3">
-              <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-950 space-y-2">
-                <p className="font-bold flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4 text-emerald-700" />
-                  <span>Automatic Backup Guaranteed</span>
-                </p>
-                <p className="text-[11px] text-stone-700 leading-relaxed">
-                  Before resetting, Google Apps Script will duplicate your current sheet to a new tab named <span className="font-mono font-bold bg-white px-1.5 py-0.5 rounded border border-rose-200 text-rose-900">Backup_YYYY-MM-DD_HH-mm</span> so your data is never lost.
-                </p>
-                <ul className="list-disc list-inside text-[11px] text-stone-600 space-y-0.5 pt-1">
-                  <li>Rows, Codes (HOH001–HOH050), and QR Payloads are never deleted.</li>
-                  <li>Buyer names, phone numbers, payments, and entry records will be reset.</li>
-                  <li>An entry will be recorded in the <strong className="text-stone-900">Audit Log</strong> tab.</li>
-                </ul>
-              </div>
+            {/* STEP 1: Prepare Event Reset */}
+            {resetStep === 'prepare' && (
+              <form onSubmit={handlePrepareResetSubmit} className="space-y-4">
+                <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-950 space-y-2">
+                  <p className="font-bold flex items-center gap-1.5 text-rose-900">
+                    <ShieldCheck className="w-4 h-4 text-emerald-700" />
+                    <span>Protected Server Reset Workflow</span>
+                  </p>
+                  <p className="text-[11px] text-stone-700 leading-relaxed">
+                    Step 1 issues a cryptographically secure one-time reset token with a 5-minute expiry.
+                    Before touching event data in Step 2, a complete snapshot in the MongoDB <strong className="text-stone-900">eventBackups</strong> collection will be created and verified.
+                  </p>
+                </div>
 
-              {/* Strict Text Confirmation */}
-              <div className="space-y-1.5">
-                <label className="block text-xs font-semibold text-stone-700">
-                  To proceed, type exactly <span className="font-mono font-bold text-rose-700">RESET HOH EVENT</span>:
-                </label>
-                <input
-                  type="text"
-                  value={resetAllConfirmText}
-                  onChange={(e) => setResetAllConfirmText(e.target.value)}
-                  placeholder="RESET HOH EVENT"
-                  className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-stone-300 focus:border-rose-600 focus:ring-1 focus:ring-rose-600"
-                />
-              </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-xs">
+                    <label className="font-semibold text-stone-700">
+                      Mandatory Reason (minimum 20 characters) <span className="text-rose-600">*</span>
+                    </label>
+                    <span className={`text-[11px] font-mono ${
+                      resetReason.trim().length >= 20 ? 'text-emerald-600' : 'text-stone-400'
+                    }`}>
+                      {resetReason.trim().length}/20 chars
+                    </span>
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={resetReason}
+                    onChange={(e) => setResetReason(e.target.value)}
+                    placeholder="Provide a detailed administrative reason for resetting all event ticket data..."
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-stone-300 focus:border-rose-600 focus:ring-1 focus:ring-rose-600 text-hoh-text"
+                    required
+                  />
+                </div>
 
-              {/* Optional Reason */}
-              <div className="space-y-1.5">
-                <label className="block text-xs font-semibold text-stone-700">
-                  Reason for Reset (Logged to Audit Log)
-                </label>
-                <input
-                  type="text"
-                  value={resetAllReason}
-                  onChange={(e) => setResetAllReason(e.target.value)}
-                  placeholder="e.g. New event season / rehearsal test wipe"
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-stone-300 focus:border-rose-600 focus:ring-1 focus:ring-rose-600 text-hoh-text"
-                />
-              </div>
-            </div>
+                <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-100">
+                  <button
+                    type="button"
+                    onClick={() => setResetAllModalOpen(false)}
+                    disabled={actionLoading}
+                    className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-xl transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
 
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-100">
-              <button
-                type="button"
-                onClick={() => setResetAllModalOpen(false)}
-                disabled={actionLoading}
-                className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-xl transition-colors"
-              >
-                Cancel
-              </button>
+                  <button
+                    type="submit"
+                    disabled={actionLoading || resetReason.trim().length < 20}
+                    className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    <span>Issue Reset Token (Step 1)</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </form>
+            )}
 
-              <button
-                type="button"
-                onClick={handleConfirmResetAll}
-                disabled={actionLoading || resetAllConfirmText.trim() !== 'RESET HOH EVENT'}
-                className="px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-xl shadow transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>Reset All 50 Tickets</span>
-              </button>
-            </div>
+            {/* STEP 2: Confirm Event Reset */}
+            {resetStep === 'confirm' && preparedResetData && (
+              <form onSubmit={handleConfirmResetSubmit} className="space-y-4">
+                <div className="p-4 bg-amber-50 border border-amber-300 rounded-xl text-xs space-y-2">
+                  <div className="flex justify-between items-center font-semibold text-amber-950">
+                    <span>One-Time Token Issued:</span>
+                    <span className="font-mono bg-white px-2 py-0.5 rounded border border-amber-200">
+                      {preparedResetData.resetToken}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center text-amber-900">
+                    <span>Token Expiration:</span>
+                    <span className="font-mono font-bold text-rose-700">
+                      {Math.floor(resetCountdown / 60)}:{(resetCountdown % 60).toString().padStart(2, '0')}
+                    </span>
+                  </div>
+                  <div className="pt-2 border-t border-amber-200/80 flex justify-between text-[11px] text-stone-700">
+                    <span>Active Registered Bookings: <strong>{preparedResetData.registeredCount}</strong></span>
+                    <span>Admitted Tickets: <strong>{preparedResetData.enteredCount}</strong></span>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-stone-700">
+                    Type exactly <span className="font-mono font-bold text-rose-700">RESET HOH EVENT</span> to finalize <span className="text-rose-600">*</span>:
+                  </label>
+                  <input
+                    type="text"
+                    value={resetConfirmText}
+                    onChange={(e) => setResetConfirmText(e.target.value)}
+                    placeholder="RESET HOH EVENT"
+                    className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-stone-300 focus:border-rose-600 focus:ring-1 focus:ring-rose-600"
+                    required
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-100">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetStep('prepare');
+                      setPreparedResetData(null);
+                    }}
+                    disabled={actionLoading}
+                    className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-xl transition-colors cursor-pointer"
+                  >
+                    Back
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={actionLoading || resetConfirmText.trim() !== 'RESET HOH EVENT'}
+                    className="px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    <span>Confirm & Reset All Tickets</span>
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}
     </div>
   );
 };
+export default TicketRegister;

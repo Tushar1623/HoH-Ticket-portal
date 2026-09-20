@@ -5,7 +5,8 @@ import {
   evaluateTicketStatus, 
   validateBuyerForm,
   normalizePaymentStatus,
-  VALID_TICKET_CODES 
+  VALID_TICKET_CODES,
+  calculateConsecutiveSeats
 } from '../lib/ticketRules';
 import { TicketRecord } from '../types/ticket';
 
@@ -210,10 +211,10 @@ describe('Google Sheets Storage Fix PRD Requirements', () => {
       updatedAt: '2026-09-19T10:00:00.000Z'
     };
 
-    // Update buyer details to Tushar Shaw
+    // Update buyer details to Mock Guest
     const updatedBuyer = {
-      buyerName: 'Tushar Shaw',
-      phone: '9163220111',
+      buyerName: 'Aarav Patel',
+      phone: '+919876543210',
       amount: 500,
       paymentStatus: normalizePaymentStatus('Paid')
     };
@@ -228,7 +229,7 @@ describe('Google Sheets Storage Fix PRD Requirements', () => {
       updatedAt: new Date().toISOString()
     };
 
-    expect(resultRecord.buyerName).toBe('Tushar Shaw');
+    expect(resultRecord.buyerName).toBe('Aarav Patel');
     expect(resultRecord.amount).toBe(500);
     expect(resultRecord.entered).toBe(true);
     expect(resultRecord.enteredAt).toBe('2026-09-19T14:30:00.000Z');
@@ -239,9 +240,9 @@ describe('Google Sheets Storage Fix PRD Requirements', () => {
     const existing: TicketRecord = {
       code: 'HOH002',
       qrPayload: 'HOH002',
-      buyerName: 'Tushar Shaw',
-      phone: '9163220111',
-      email: 'test@hoh.com',
+      buyerName: 'Aarav Patel',
+      phone: '+919876543210',
+      email: 'guest@example.com',
       guests: 3,
       paymentStatus: 'Paid',
       amount: 1500,
@@ -285,6 +286,83 @@ describe('Google Sheets Storage Fix PRD Requirements', () => {
     expect('RESET HOH EVENT'.trim()).toBe(validConfirmation);
     expect('reset hoh event'.trim() === validConfirmation).toBe(false);
     expect('RESET'.trim() === validConfirmation).toBe(false);
+  });
+});
+
+describe('Consecutive Seat Auto-Selection Engine (calculateConsecutiveSeats)', () => {
+  it('automatically adds and selects HOH002 when booking 2 seats starting from HOH001', () => {
+    const mockTickets: Record<string, TicketRecord> = {};
+    VALID_TICKET_CODES.forEach((c, idx) => {
+      mockTickets[c] = {
+        code: c,
+        serialNumber: idx + 1,
+        buyerName: '',
+        phone: '',
+        guests: 1,
+        paymentStatus: 'Pending',
+        amount: 0,
+        entered: false,
+        updatedAt: ''
+      };
+    });
+
+    const res = calculateConsecutiveSeats(mockTickets, 2, 'HOH001');
+    expect(res.success).toBe(true);
+    expect(res.isConsecutive).toBe(true);
+    expect(res.proposedCodes).toEqual(['HOH001', 'HOH002']);
+  });
+
+  it('automatically adds and selects HOH003 and more when booking 2 or 3 seats from HOH002', () => {
+    const mockTickets: Record<string, TicketRecord> = {};
+    VALID_TICKET_CODES.forEach((c, idx) => {
+      mockTickets[c] = {
+        code: c,
+        serialNumber: idx + 1,
+        buyerName: '',
+        phone: '',
+        guests: 1,
+        paymentStatus: 'Pending',
+        amount: 0,
+        entered: false,
+        updatedAt: ''
+      };
+    });
+
+    // 2 seats from HOH002 -> HOH002, HOH003
+    const res2 = calculateConsecutiveSeats(mockTickets, 2, 'HOH002');
+    expect(res2.success).toBe(true);
+    expect(res2.proposedCodes).toEqual(['HOH002', 'HOH003']);
+
+    // 3 seats from HOH002 -> HOH002, HOH003, HOH004
+    const res3 = calculateConsecutiveSeats(mockTickets, 3, 'HOH002');
+    expect(res3.success).toBe(true);
+    expect(res3.proposedCodes).toEqual(['HOH002', 'HOH003', 'HOH004']);
+  });
+
+  it('slides to next available consecutive block if requested starting seat or next seat is booked', () => {
+    const mockTickets: Record<string, TicketRecord> = {};
+    VALID_TICKET_CODES.forEach((c, idx) => {
+      mockTickets[c] = {
+        code: c,
+        serialNumber: idx + 1,
+        buyerName: '',
+        phone: '',
+        guests: 1,
+        paymentStatus: 'Pending',
+        amount: 0,
+        entered: false,
+        updatedAt: ''
+      };
+    });
+
+    // Book HOH002
+    mockTickets['HOH002'].buyerName = 'Existing Buyer';
+
+    // When someone tries 2 seats starting at HOH001, since HOH002 is booked, it slides to HOH003, HOH004
+    const res = calculateConsecutiveSeats(mockTickets, 2, 'HOH001');
+    expect(res.success).toBe(true);
+    expect(res.isConsecutive).toBe(true);
+    expect(res.proposedCodes).toEqual(['HOH003', 'HOH004']);
   });
 });
 

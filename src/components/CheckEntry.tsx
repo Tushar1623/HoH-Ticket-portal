@@ -4,36 +4,38 @@ import confetti from 'canvas-confetti';
 import {
   QrCode, Camera, CameraOff, Search, CheckCircle2, User, Phone, Users,
   IndianRupee, Clock, ArrowRight, ShieldCheck, RefreshCw, AlertCircle,
-  Upload, Sparkles, Volume2, VolumeX, AlertTriangle, RotateCcw
+  Upload, Sparkles, Volume2, VolumeX, AlertTriangle, Play
 } from 'lucide-react';
-import { TicketRecord, TicketStatus } from '../types/ticket';
+import { StaffRole, TicketRecord, TicketStatus } from '../types/ticket';
 import {
   evaluateTicketStatus,
   formatCurrency,
   formatLocalTimestamp,
   normalizeTicketCode
 } from '../lib/ticketRules';
+import { apiClient } from '../lib/apiClient';
 import { PaymentBadge, TicketStatusBanner } from './StatusBadge';
 
 interface CheckEntryProps {
   tickets: Record<string, TicketRecord>;
   onMarkEntered: (code: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
-  onSetEntryStatus?: (code: string, entered: boolean, reason?: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
   onNavigateToRegistration: (code: string) => void;
-  staffRole?: string;
+  staffRole?: StaffRole;
 }
 
 export const CheckEntry: React.FC<CheckEntryProps> = ({
   tickets,
   onMarkEntered,
-  onSetEntryStatus,
   onNavigateToRegistration,
   staffRole: _staffRole
 }) => {
   const [inputCode, setInputCode] = useState<string>('');
   const [activeCode, setActiveCode] = useState<string>('');
+  const [liveTicket, setLiveTicket] = useState<Partial<TicketRecord> | null>(null);
   const [isScanning, setIsScanning] = useState<boolean>(false);
+  const [scannerPaused, setScannerPaused] = useState<boolean>(false);
   const [scannerError, setScannerError] = useState<string | null>(null);
+  const [isLookingUp, setIsLookingUp] = useState<boolean>(false);
   const [isMarking, setIsMarking] = useState<boolean>(false);
   const [entryMessage, setEntryMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
@@ -42,13 +44,16 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
   const scannerContainerId = 'hoh-qr-reader-container';
 
-  // Current ticket record and classification
-  const currentTicket = activeCode ? tickets[activeCode] : undefined;
+  // Fallback to local tickets if liveTicket not yet loaded
+  const currentTicket: TicketRecord | undefined = (liveTicket?.code === activeCode
+    ? (liveTicket as TicketRecord)
+    : tickets[activeCode]) || undefined;
+
   const ticketStatus: TicketStatus | null = activeCode
     ? evaluateTicketStatus(currentTicket, activeCode)
     : null;
 
-  // Sound effects via Web Audio API (no external asset dependencies)
+  // Sound effects via Web Audio API
   const playChime = (success: boolean) => {
     if (!soundEnabled) return;
     try {
@@ -61,16 +66,14 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
       gain.connect(ctx.destination);
 
       if (success) {
-        // High pleasant major chord chime
         osc.type = 'sine';
-        osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1); // A5
+        osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1);
         gain.gain.setValueAtTime(0.3, ctx.currentTime);
         gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
         osc.start();
         osc.stop(ctx.currentTime + 0.35);
       } else {
-        // Low buzz warning
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(160, ctx.currentTime);
         osc.frequency.setValueAtTime(110, ctx.currentTime + 0.15);
@@ -79,28 +82,80 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
         osc.start();
         osc.stop(ctx.currentTime + 0.4);
       }
-    } catch {
-      // Audio autoplay policy or not supported, ignore silently
-    }
+    } catch {}
   };
 
-  // Perform lookup on a given code
-  const handleLookup = (code: string) => {
+  // Perform secure backend lookup on ticket code
+  const handleLookup = async (code: string) => {
     setEntryMessage(null);
     const normalized = normalizeTicketCode(code);
     setActiveCode(normalized);
     setInputCode(normalized);
 
-    const ticket = tickets[normalized];
-    const status = evaluateTicketStatus(ticket, normalized);
+    // Rule 7: Stop camera scanning after first valid QR decode until staff presses Scan Again
+    if (isScanning) {
+      await stopScanner();
+      setScannerPaused(true);
+    }
 
-    if (status === 'VALID') {
-      playChime(true);
-      // Trigger subtle vibration if mobile
-      if (navigator.vibrate) navigator.vibrate(50);
-    } else {
+    setIsLookingUp(true);
+
+    try {
+      const res = await apiClient.verifyTicket(normalized);
+      if (res.ok && res.data) {
+        const t = res.data.ticket;
+        const b = res.data.booking;
+        const enrichedRecord: TicketRecord = {
+          code: t.code,
+          qrPayload: t.qrPayload || t.code,
+          serialNumber: t.serialNumber,
+          bookingId: t.bookingId,
+          bookingCode: b?.bookingCode,
+          buyerName: b?.buyerName || '',
+          phone: b?.phone || '',
+          email: b?.email || '',
+          guests: 1,
+          paymentStatus: b?.paymentStatus || 'Pending',
+          amount: b?.totalAmount || 0,
+          status: t.status,
+          entered: !!t.entered,
+          enteredAt: t.enteredAt,
+          entryCount: t.entryCount || 0,
+          updatedAt: t.updatedAt || new Date().toISOString()
+        };
+        setLiveTicket(enrichedRecord);
+        const st = evaluateTicketStatus(enrichedRecord, normalized);
+        if (st === 'VALID') {
+          playChime(true);
+          if (navigator.vibrate) navigator.vibrate(50);
+        } else if (st === 'ALREADY_ENTERED' || enrichedRecord.entered) {
+          playChime(false);
+          const timeStr = enrichedRecord.enteredAt ? formatLocalTimestamp(enrichedRecord.enteredAt) : 'earlier session';
+          setEntryMessage({
+            type: 'error',
+            text: `Already Entered at ${timeStr}. Do not admit.`
+          });
+          if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+        } else {
+          playChime(false);
+          if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+        }
+      } else {
+        setLiveTicket(null);
+        setEntryMessage({
+          type: 'error',
+          text: res.error || `Invalid Ticket: Code ${normalized} not found.`
+        });
+        playChime(false);
+      }
+    } catch {
+      setEntryMessage({
+        type: 'error',
+        text: 'Sync Failed — gate lookup failed. Check connection.'
+      });
       playChime(false);
-      if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+    } finally {
+      setIsLookingUp(false);
     }
   };
 
@@ -120,51 +175,43 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
           spread: 60,
           origin: { y: 0.6 }
         });
+
+        // Update active live ticket status to entered
+        setLiveTicket(prev => prev ? { ...prev, entered: true, enteredAt: new Date().toISOString() } : null);
+
         if (currentTicket) {
           setRecentAdmissions(prev => [
             {
               code: activeCode,
-              name: currentTicket.buyerName,
+              name: currentTicket.buyerName || 'Guest',
               time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              guests: currentTicket.guests
+              guests: currentTicket.guests || 1
             },
             ...prev.slice(0, 7)
           ]);
         }
       } else {
-        setEntryMessage({ type: 'error', text: res.error || 'Admission denied.' });
+        const errorText = res.error?.includes('Sync Failed')
+          ? 'Sync Failed — entry was not recorded. Do not admit until connection is restored.'
+          : (res.error || 'Admission denied.');
+        setEntryMessage({ type: 'error', text: errorText });
         playChime(false);
       }
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      setEntryMessage({ type: 'error', text: `Admission error: ${errMsg}` });
+    } catch {
+      setEntryMessage({
+        type: 'error',
+        text: 'Sync Failed — entry was not recorded. Do not admit until connection is restored.'
+      });
       playChime(false);
     } finally {
       setIsMarking(false);
     }
   };
 
-  // Direct manual toggle: change from Entered to Not Entered (Allow Re-entry)
-  const handleDirectResetNotEntered = async () => {
-    if (!activeCode || isMarking || !onSetEntryStatus) return;
-    setIsMarking(true);
-    setEntryMessage(null);
-
-    const res = await onSetEntryStatus(activeCode, false, 'Manual re-entry override at gate');
-    setIsMarking(false);
-
-    if (res.ok) {
-      setEntryMessage({ type: 'success', text: `Ticket ${activeCode} reset to Not Entered. It can now be admitted again.` });
-      playChime(true);
-    } else {
-      setEntryMessage({ type: 'error', text: res.error || 'Failed to update entry status.' });
-      playChime(false);
-    }
-  };
-
   // Start Camera QR Scanner
   const startScanner = async () => {
     setScannerError(null);
+    setScannerPaused(false);
     try {
       if (!html5QrCodeRef.current) {
         html5QrCodeRef.current = new Html5Qrcode(scannerContainerId, {
@@ -174,26 +221,23 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
       }
 
       await html5QrCodeRef.current.start(
-        { facingMode: 'environment' }, // Prefer back camera on mobile phones
+        { facingMode: 'environment' },
         {
           fps: 10,
           qrbox: { width: 250, height: 250 },
           aspectRatio: 1.0
         },
         (decodedText) => {
-          // Success callback
           handleLookup(decodedText);
         },
-        () => {
-          // Frame error (e.g. no QR in frame), safe to ignore
-        }
+        () => {}
       );
 
       setIsScanning(true);
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error('QR Scanner start error:', err);
-      setScannerError(`Camera access denied or unavailable: ${errMsg}. You can type the code or use the sample QR simulator below.`);
+      setScannerError(`Camera access denied or unavailable: ${errMsg}.`);
       setIsScanning(false);
     }
   };
@@ -216,12 +260,10 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
       if (html5QrCodeRef.current) {
         try {
           if (html5QrCodeRef.current.isScanning) {
-            html5QrCodeRef.current.stop().catch(() => { });
+            html5QrCodeRef.current.stop().catch(() => {});
           }
           html5QrCodeRef.current.clear();
-        } catch {
-          // ignore cleanup errors
-        }
+        } catch {}
       }
     };
   }, []);
@@ -237,7 +279,7 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
       }
       const decodedResult = await html5QrCodeRef.current.scanFile(file, true);
       handleLookup(decodedResult);
-    } catch (err) {
+    } catch {
       setScannerError('Could not decode QR code from the selected image. Please try another image or enter manually.');
     }
   };
@@ -254,132 +296,151 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
             </span>
           </h2>
           <p className="text-sm text-hoh-muted mt-0.5">
-            Scan guest QR code or enter ticket number to verify validity and prevent duplicate entry.
+            Scan guest QR code or enter ticket number for live server lookup and atomic admission recording.
           </p>
         </div>
 
         {/* Audio Toggle */}
-        <div className="flex items-center gap-2 self-start sm:self-auto">
-          <button
-            type="button"
-            onClick={() => setSoundEnabled(!soundEnabled)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition-all ${soundEnabled
-                ? 'bg-hoh-burgundy text-hoh-gold border-hoh-gold/30'
-                : 'bg-stone-200 text-stone-600 border-stone-300'
-              }`}
-          >
-            {soundEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-            <span>{soundEnabled ? 'Chimes ON' : 'Muted'}</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => setSoundEnabled(!soundEnabled)}
+          className="self-start sm:self-auto flex items-center gap-2 px-3 py-1.5 rounded-full bg-white border border-stone-300 text-xs font-semibold text-stone-700 hover:bg-stone-50 transition-colors shadow-sm cursor-pointer"
+        >
+          {soundEnabled ? (
+            <>
+              <Volume2 className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Gate Chimes Active</span>
+            </>
+          ) : (
+            <>
+              <VolumeX className="w-3.5 h-3.5 text-stone-400" />
+              <span>Chimes Muted</span>
+            </>
+          )}
+        </button>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Scanner & Code Input (5 cols on lg) */}
+        {/* Left Column: Camera Scanner & Code Input (5 cols on lg) */}
         <div className="lg:col-span-5 space-y-5">
-          {/* QR Camera Card */}
-          <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 p-5 overflow-hidden">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-bold text-sm text-hoh-burgundy flex items-center gap-1.5">
-                <Camera className="w-4 h-4 text-hoh-gold" />
-                <span>Camera QR Scanner</span>
-              </h3>
-              {isScanning && (
-                <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-600 animate-pulse">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                  Active
-                </span>
-              )}
+          {/* Camera Scanner Card */}
+          <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 overflow-hidden">
+            <div className="bg-gradient-to-r from-hoh-burgundy to-hoh-burgundy-dark p-4 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Camera className="w-5 h-5 text-hoh-gold" />
+                <h3 className="font-serif font-bold text-sm tracking-wide">
+                  Gate Camera Scanner
+                </h3>
+              </div>
+              <span className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold ${
+                isScanning ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-stone-700 text-stone-300'
+              }`}>
+                {isScanning ? 'Camera Live' : scannerPaused ? 'Scan Paused' : 'Camera Standby'}
+              </span>
             </div>
 
-            {/* Video Preview Container */}
-            <div className="relative rounded-xl overflow-hidden bg-stone-900 border border-stone-300 min-h-[240px] flex items-center justify-center">
-              <div id={scannerContainerId} className="w-full"></div>
-              {!isScanning && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-stone-900/95 text-stone-300">
-                  <QrCode className="w-12 h-12 text-hoh-gold/70 mb-2" />
-                  <p className="text-xs text-stone-300 max-w-[200px]">
-                    Click below to open phone camera and point at printed or mobile QR code.
-                  </p>
+            <div className="p-4 space-y-3">
+              {/* Scanner Viewport Container */}
+              <div className="relative rounded-xl overflow-hidden bg-stone-900 aspect-square flex items-center justify-center border-2 border-dashed border-stone-700">
+                <div id={scannerContainerId} className="w-full h-full" />
+                {!isScanning && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-stone-400 bg-stone-900/90 space-y-3">
+                    <QrCode className="w-16 h-16 text-hoh-gold/60 animate-pulse" />
+                    <div>
+                      <p className="font-semibold text-stone-200 text-sm">
+                        {scannerPaused ? 'Ticket Scanned & Paused' : 'Live Gate QR Scanner'}
+                      </p>
+                      <p className="text-xs text-stone-400 mt-1 max-w-[220px]">
+                        {scannerPaused
+                          ? 'Press "Scan Next Ticket" to resume camera verification.'
+                          : 'Click below to activate device camera for instant verification.'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {scannerError && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>{scannerError}</span>
                 </div>
               )}
-            </div>
 
-            {/* Camera Controls */}
-            <div className="mt-4 flex gap-2">
-              {!isScanning ? (
-                <button
-                  type="button"
-                  onClick={startScanner}
-                  className="flex-1 py-2.5 px-4 bg-hoh-burgundy hover:bg-hoh-burgundy-light text-white font-semibold text-xs rounded-xl transition-colors shadow-sm flex items-center justify-center gap-2"
-                >
-                  <Camera className="w-4 h-4 text-hoh-gold" />
-                  <span>Start Camera Scanner</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={stopScanner}
-                  className="flex-1 py-2.5 px-4 bg-stone-700 hover:bg-stone-800 text-white font-semibold text-xs rounded-xl transition-colors shadow-sm flex items-center justify-center gap-2"
-                >
-                  <CameraOff className="w-4 h-4" />
-                  <span>Stop Camera</span>
-                </button>
-              )}
-            </div>
+              {/* Camera Start / Stop / Resume Controls */}
+              <div className="flex flex-col gap-2 pt-1">
+                {scannerPaused ? (
+                  <button
+                    type="button"
+                    onClick={startScanner}
+                    className="w-full py-3 bg-hoh-gold hover:bg-amber-400 text-hoh-burgundy-dark font-black text-sm rounded-xl shadow-gold-glow transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Play className="w-4 h-4 fill-current" />
+                    <span>Scan Next Ticket (Scan Again)</span>
+                  </button>
+                ) : !isScanning ? (
+                  <button
+                    type="button"
+                    onClick={startScanner}
+                    className="w-full py-2.5 bg-hoh-burgundy hover:bg-hoh-burgundy-light text-white font-bold text-xs rounded-xl shadow transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Camera className="w-4 h-4 text-hoh-gold" />
+                    <span>Activate Camera Scanner</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={stopScanner}
+                    className="w-full py-2.5 bg-stone-700 hover:bg-stone-800 text-stone-200 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <CameraOff className="w-4 h-4" />
+                    <span>Pause Camera</span>
+                  </button>
+                )}
 
-            {scannerError && (
-              <div className="mt-3 p-3 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-900 flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                <span>{scannerError}</span>
+                {/* Upload QR image as secondary option */}
+                <label className="w-full py-2 px-3 border border-stone-300 hover:bg-stone-50 rounded-xl text-xs font-semibold text-stone-700 text-center cursor-pointer flex items-center justify-center gap-1.5 transition-colors">
+                  <Upload className="w-3.5 h-3.5 text-stone-500" />
+                  <span>Scan QR from Image File</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageUpload}
+                    className="hidden"
+                  />
+                </label>
               </div>
-            )}
-
-            {/* Image File Upload Option */}
-            <div className="mt-4 pt-3 border-t border-stone-100 flex items-center justify-between">
-              <span className="text-xs text-stone-500 flex items-center gap-1">
-                <Upload className="w-3.5 h-3.5" />
-                Scan QR from image file:
-              </span>
-              <label className="cursor-pointer text-xs font-semibold text-hoh-burgundy hover:text-hoh-gold-dark underline">
-                Browse file
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleImageUpload}
-                  className="hidden"
-                />
-              </label>
             </div>
           </div>
 
           {/* Manual Code Input Card */}
-          <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 p-5">
-            <h3 className="font-bold text-sm text-hoh-burgundy flex items-center gap-1.5 mb-3">
+          <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 p-4 sm:p-5 space-y-3">
+            <h4 className="font-serif font-bold text-sm text-hoh-burgundy flex items-center gap-1.5">
               <Search className="w-4 h-4 text-hoh-gold" />
-              <span>Manual Ticket Code Entry</span>
-            </h3>
+              <span>Manual Ticket Code Lookup</span>
+            </h4>
 
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                handleLookup(inputCode);
+                if (inputCode.trim()) handleLookup(inputCode.trim());
               }}
-              className="space-y-3"
+              className="space-y-2"
             >
               <div className="relative">
                 <input
                   type="text"
                   value={inputCode}
-                  onChange={(e) => setInputCode(e.target.value)}
-                  placeholder="e.g. HOH017 or 17"
-                  className="w-full px-4 py-3 rounded-xl border-2 border-stone-300 focus:border-hoh-burgundy focus:ring-2 focus:ring-hoh-burgundy/10 text-hoh-burgundy font-mono font-bold text-lg uppercase tracking-wider transition-all placeholder-stone-400"
+                  onChange={(e) => setInputCode(e.target.value.toUpperCase())}
+                  placeholder="e.g. HOH001"
+                  className="w-full pl-3 pr-24 py-2.5 font-mono text-sm font-bold uppercase rounded-xl border border-stone-300 focus:border-hoh-burgundy focus:ring-1 focus:ring-hoh-burgundy"
                 />
                 <button
                   type="submit"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 px-4 py-2 bg-hoh-burgundy hover:bg-hoh-burgundy-light text-hoh-gold font-bold text-xs rounded-lg transition-colors shadow-sm"
+                  disabled={!inputCode.trim() || isLookingUp}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 px-4 py-1.5 bg-hoh-burgundy hover:bg-hoh-burgundy-light text-hoh-gold font-bold text-xs rounded-lg transition-colors shadow-sm disabled:opacity-50 cursor-pointer"
                 >
-                  Verify
+                  {isLookingUp ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : 'Verify'}
                 </button>
               </div>
               <p className="text-xs text-stone-500">
@@ -387,14 +448,12 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
               </p>
             </form>
 
-            {/* Quick Test Sample QR Selector */}
-            <div className="mt-4 pt-4 border-t border-stone-200">
-              <div className="flex items-center justify-between mb-2">
-                <label htmlFor="quick-test-select" className="text-xs font-semibold text-stone-700 flex items-center gap-1">
-                  <Sparkles className="w-3.5 h-3.5 text-hoh-gold" />
-                  Quick Test with Sample Codes:
-                </label>
-              </div>
+            {/* Quick Test Simulator */}
+            <div className="pt-3 border-t border-stone-200">
+              <label htmlFor="quick-test-select" className="text-xs font-semibold text-stone-700 flex items-center gap-1 mb-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-hoh-gold" />
+                <span>Simulate Scanning Ticket Code:</span>
+              </label>
               <select
                 id="quick-test-select"
                 onChange={(e) => {
@@ -403,13 +462,13 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                 className="w-full text-xs bg-stone-50 border border-stone-300 rounded-lg px-3 py-2 font-mono text-stone-800 focus:ring-1 focus:ring-hoh-burgundy cursor-pointer"
                 defaultValue=""
               >
-                <option value="" disabled>-- Simulate Scanning a Ticket --</option>
+                <option value="" disabled>-- Select Ticket Code --</option>
                 <option value="HOH001">HOH001</option>
                 <option value="HOH005">HOH005</option>
                 <option value="HOH012">HOH012</option>
                 <option value="HOH025">HOH025</option>
                 <option value="HOH050">HOH050</option>
-                <option value="HOH051">HOH051 (Simulate Invalid Code)</option>
+                <option value="HOH051">HOH051 (Out of Range Check)</option>
               </select>
             </div>
           </div>
@@ -443,12 +502,17 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
 
               {/* Status Banner */}
               <div className="p-4 sm:p-6 pb-2">
-                {ticketStatus && (
+                {isLookingUp ? (
+                  <div className="p-4 bg-stone-50 rounded-xl border border-stone-200 flex items-center justify-center gap-2 text-stone-600 text-xs">
+                    <RefreshCw className="w-4 h-4 animate-spin text-hoh-burgundy" />
+                    <span>Verifying ticket with MongoDB Atlas...</span>
+                  </div>
+                ) : ticketStatus ? (
                   <TicketStatusBanner
                     status={ticketStatus}
                     enteredAt={formatLocalTimestamp(currentTicket?.enteredAt)}
                   />
-                )}
+                ) : null}
               </div>
 
               {/* Ticket Details Body */}
@@ -467,17 +531,6 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                         </div>
                       </div>
 
-                      {/* Phone */}
-                      <div>
-                        <div className="text-xs font-medium text-stone-500 flex items-center gap-1">
-                          <Phone className="w-3.5 h-3.5 text-hoh-burgundy" />
-                          <span>Contact Phone</span>
-                        </div>
-                        <div className="font-mono font-semibold text-stone-800 mt-0.5">
-                          {currentTicket.phone || '—'}
-                        </div>
-                      </div>
-
                       {/* Guests Covered */}
                       <div>
                         <div className="text-xs font-medium text-stone-500 flex items-center gap-1">
@@ -492,16 +545,29 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                         </div>
                       </div>
 
-                      {/* Amount */}
+                      {/* Payment */}
                       <div>
                         <div className="text-xs font-medium text-stone-500 flex items-center gap-1">
                           <IndianRupee className="w-3.5 h-3.5 text-hoh-burgundy" />
-                          <span>Payment</span>
+                          <span>Payment Status</span>
                         </div>
                         <div className="font-semibold text-stone-800 mt-0.5">
-                          {formatCurrency(currentTicket.amount)}
+                          {currentTicket.paymentStatus} ({formatCurrency(currentTicket.amount)})
                         </div>
                       </div>
+
+                      {/* Phone (if available/unmasked) */}
+                      {currentTicket.phone && (
+                        <div>
+                          <div className="text-xs font-medium text-stone-500 flex items-center gap-1">
+                            <Phone className="w-3.5 h-3.5 text-hoh-burgundy" />
+                            <span>Contact</span>
+                          </div>
+                          <div className="font-mono font-semibold text-stone-800 mt-0.5">
+                            {currentTicket.phone}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* Operational Notes */}
@@ -520,7 +586,7 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                     <button
                       type="button"
                       onClick={() => onNavigateToRegistration(activeCode)}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 bg-hoh-burgundy text-hoh-gold font-semibold text-xs rounded-lg hover:bg-hoh-burgundy-light transition-all shadow-sm"
+                      className="inline-flex items-center gap-1.5 px-4 py-2 bg-hoh-burgundy text-hoh-gold font-semibold text-xs rounded-lg hover:bg-hoh-burgundy-light transition-all shadow-sm cursor-pointer"
                     >
                       <span>Register Buyer for {activeCode}</span>
                       <ArrowRight className="w-3.5 h-3.5" />
@@ -531,10 +597,11 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                 {/* Admission Feedback Message */}
                 {entryMessage && (
                   <div
-                    className={`p-3 rounded-xl flex items-center gap-2 text-sm font-medium ${entryMessage.type === 'success'
+                    className={`p-3 rounded-xl flex items-center gap-2 text-sm font-medium ${
+                      entryMessage.type === 'success'
                         ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
                         : 'bg-rose-100 text-rose-900 border border-rose-300'
-                      }`}
+                    }`}
                   >
                     {entryMessage.type === 'success' ? (
                       <CheckCircle2 className="w-5 h-5 text-emerald-700 shrink-0" />
@@ -545,19 +612,20 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                   </div>
                 )}
 
-                {/* Primary Action: Mark as Entered */}
+                {/* Primary Action: Mark as Entered (Gate Staff) */}
+                {/* Note: "Change to Not Entered" is strictly removed from Gate Scanner */}
                 <div className="pt-3">
                   {ticketStatus === 'VALID' ? (
                     <button
                       type="button"
-                      disabled={isMarking}
+                      disabled={isMarking || isLookingUp}
                       onClick={handleConfirmAdmission}
-                      className="w-full py-4 bg-hoh-success hover:bg-emerald-800 text-white font-bold text-lg rounded-xl shadow-theatre transition-all transform active:scale-[0.99] flex items-center justify-center gap-3 disabled:opacity-50"
+                      className="w-full py-4 bg-hoh-success hover:bg-emerald-800 text-white font-bold text-lg rounded-xl shadow-theatre transition-all transform active:scale-[0.99] flex items-center justify-center gap-3 disabled:opacity-50 cursor-pointer"
                     >
                       {isMarking ? (
                         <>
                           <RefreshCw className="w-6 h-6 animate-spin" />
-                          <span>Verifying & Locking Entry...</span>
+                          <span>Verifying & Locking Entry on MongoDB Atlas...</span>
                         </>
                       ) : (
                         <>
@@ -567,25 +635,9 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                       )}
                     </button>
                   ) : ticketStatus === 'ALREADY_ENTERED' ? (
-                    <div className="space-y-2.5">
-                      <div className="w-full py-3.5 bg-rose-100 border-2 border-rose-400 text-rose-900 font-bold text-center rounded-xl flex items-center justify-center gap-2 shadow-sm">
-                        <AlertCircle className="w-5 h-5 text-rose-700" />
-                        <span>ENTRY BLOCKED: ALREADY ADMITTED</span>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={isMarking}
-                        onClick={handleDirectResetNotEntered}
-                        className="w-full py-3 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer disabled:opacity-50 active:scale-[0.99]"
-                        title="Directly reset to Not Entered so guest can be scanned again"
-                      >
-                        {isMarking ? (
-                          <RefreshCw className="w-4 h-4 animate-spin text-amber-800" />
-                        ) : (
-                          <RotateCcw className="w-4 h-4 text-amber-800" />
-                        )}
-                        <span>Change to "Not Entered" (Allow Re-Entry)</span>
-                      </button>
+                    <div className="w-full py-3.5 bg-rose-100 border-2 border-rose-400 text-rose-900 font-bold text-center rounded-xl flex items-center justify-center gap-2 shadow-sm">
+                      <AlertCircle className="w-5 h-5 text-rose-700" />
+                      <span>ENTRY BLOCKED: ALREADY ENTERED. DO NOT ADMIT.</span>
                     </div>
                   ) : (
                     <div className="w-full py-3 bg-stone-100 border border-stone-200 text-stone-500 font-semibold text-center rounded-xl text-sm">
@@ -604,12 +656,12 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                 Ready to Verify Tickets
               </h3>
               <p className="text-sm text-hoh-muted max-w-sm mt-1">
-                Scan the customer QR code with your camera or enter the ticket number on the left to verify admission.
+                Scan guest QR code with camera or enter the ticket number to verify live server status.
               </p>
             </div>
           )}
 
-          {/* Recent Gate Admissions (Audit stream for bouncers) */}
+          {/* Recent Gate Admissions */}
           <div className="bg-white rounded-2xl shadow-theatre border border-stone-200 p-4 sm:p-5">
             <h4 className="font-bold text-xs uppercase tracking-wider text-hoh-burgundy mb-3 flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-hoh-gold" />
@@ -640,3 +692,4 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
     </div>
   );
 };
+export default CheckEntry;

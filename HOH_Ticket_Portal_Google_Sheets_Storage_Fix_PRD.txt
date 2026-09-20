@@ -29,8 +29,8 @@ correspond to one Sheet row.
 
 The frontend form produces structured information such as:
 
-Ticket Code: HOH001 Buyer Name: Tushar Shaw Phone: 9163220111 Email:
-godfatherbabaji12@gmail.com Guests: 1 Payment Status: Paid (Full
+Ticket Code: HOH001 Buyer Name: Aarav Patel Phone: 9876543210 Email:
+guest@example.com Guests: 1 Payment Status: Paid (Full
 Payment) Amount: 500 Operational Notes: user-entered notes
 
 However, this information is not currently being persisted into the
@@ -38,7 +38,7 @@ Google Sheet in the correct columns.
 
 The interface can display an existing ticket such as:
 
-HOH001 - Registered (Tushar Shaw)
+HOH001 - Registered (Aarav Patel)
 
 and can show:
 
@@ -123,8 +123,8 @@ normalized object.
 Example:
 
 { “action”: “upsert”, “code”: “HOH001”, “qrPayload”: “HOH001”,
-“buyerName”: “Tushar Shaw”, “phone”: “9163220111”, “email”:
-“godfatherbabaji12@gmail.com”, “guests”: 1, “paymentStatus”: “Paid”,
+“buyerName”: “Aarav Patel”, “phone”: “9876543210”, “email”:
+“guest@example.com”, “guests”: 1, “paymentStatus”: “Paid”,
 “amount”: 500, “notes”: “” }
 
 The frontend must send the ticket code only as:
@@ -194,12 +194,12 @@ HOH001 | HOH001 | Old Name | 9000000000 | old@email.com | 1 | Pending |
 
 User changes the form to:
 
-Buyer Name: Tushar Shaw Phone: 9163220111 Email:
-godfatherbabaji12@gmail.com Guests: 1 Payment Status: Paid Amount: 500
+Buyer Name: Aarav Patel Phone: 9876543210 Email:
+guest@example.com Guests: 1 Payment Status: Paid Amount: 500
 
 The Sheet must become:
 
-HOH001 | HOH001 | Tushar Shaw | 9163220111 | godfatherbabaji12@gmail.com
+HOH001 | HOH001 | Aarav Patel | 9876543210 | guest@example.com
 | 1 | Paid | 500 | | FALSE | | original registration time | new update
 time | current staff
 
@@ -235,8 +235,8 @@ GET /exec action=health
 POST: { “action”: “lookup”, “code”: “HOH001” }
 
 POST: { “action”: “upsert”, “code”: “HOH001”, “qrPayload”: “HOH001”,
-“buyerName”: “Tushar Shaw”, “phone”: “9163220111”, “email”:
-“godfatherbabaji12@gmail.com”, “guests”: 1, “paymentStatus”: “Paid”,
+“buyerName”: “Aarav Patel”, “phone”: “9876543210”, “email”:
+“guest@example.com”, “guests”: 1, “paymentStatus”: “Paid”,
 “amount”: 500, “notes”: “” }
 
 POST: { “action”: “markEntered”, “code”: “HOH001” }
@@ -248,8 +248,8 @@ Every response must contain an “ok” boolean.
 Successful upsert example:
 
 { “ok”: true, “message”: “Ticket saved successfully”, “ticket”: {
-“code”: “HOH001”, “buyerName”: “Tushar Shaw”, “phone”: “9163220111”,
-“email”: “godfatherbabaji12@gmail.com”, “guests”: 1, “paymentStatus”:
+“code”: “HOH001”, “buyerName”: “Aarav Patel”, “phone”: “9876543210”,
+“email”: “guest@example.com”, “guests”: 1, “paymentStatus”:
 “Paid”, “amount”: 500, “entered”: false } }
 
 Failed response example:
@@ -442,9 +442,9 @@ Expected Sheet: Paid
 
 TEST 5 - Phone preservation
 
-Input: 09163220111
+Input: 09876543210
 
-Expected Sheet: 09163220111
+Expected Sheet: 09876543210
 
 Phone must be stored as text.
 
