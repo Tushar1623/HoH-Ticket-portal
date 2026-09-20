@@ -456,6 +456,235 @@ export class SheetClient {
     };
   }
 
+  /**
+   * 1. Manual Entry Status Toggle with mandatory reason
+   */
+  public async setEntryStatus(
+    code: string,
+    entered: boolean,
+    reason: string = 'Direct manual toggle',
+    staffId: string = 'Ticket Register Staff'
+  ): Promise<ApiResponse<TicketRecord>> {
+    const normalized = normalizeTicketCode(code);
+    if (!isValidTicketCode(normalized)) {
+      return { ok: false, error: 'Invalid Ticket. Code outside approved range HOH001-HOH050.' };
+    }
+
+    const cleanReason = String(reason || 'Direct manual toggle').trim();
+    const now = new Date().toISOString();
+
+    if (this.scriptUrl) {
+      try {
+        const res = await fetch(this.scriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'setEntryStatus',
+            code: normalized,
+            entered,
+            reason: cleanReason,
+            staffId
+          })
+        });
+
+        if (!res.ok) {
+          return { ok: false, error: 'Sync Failed. Please check your connection.' };
+        }
+
+        const json = await res.json();
+        const ticketData = json.ticket || json.data;
+
+        if (json && json.ok && ticketData) {
+          const localData = getLocalTickets();
+          localData[normalized] = ticketData;
+          saveLocalTickets(localData);
+          return { ok: true, data: ticketData, message: json.message || `Entry status updated to ${entered ? 'Entered' : 'Not Entered'}.` };
+        } else if (json && json.error && (json.error.includes('Invalid or missing action') || json.error.includes('not found') || json.error.includes('action'))) {
+          const localData = getLocalTickets();
+          const existing = localData[normalized] || {
+            code: normalized,
+            qrPayload: normalized,
+            buyerName: '',
+            phone: '',
+            guests: 1,
+            paymentStatus: 'Pending',
+            amount: 0,
+            entered: false,
+            updatedAt: now
+          };
+          existing.entered = entered;
+          existing.enteredAt = entered ? (existing.enteredAt || now) : '';
+          existing.updatedAt = now;
+          existing.updatedBy = staffId;
+          localData[normalized] = existing;
+          saveLocalTickets(localData);
+          return {
+            ok: true,
+            data: existing,
+            message: `Status changed to ${entered ? 'Entered' : 'Not Entered'}! (Deploy "New version" in Apps Script to sync with Google Sheets).`
+          };
+        } else {
+          return { ok: false, error: json.error || 'Failed to update entry status.' };
+        }
+      } catch {
+        return { ok: false, error: 'Sync Failed. Please check your connection.' };
+      }
+    }
+
+    // Local Storage fallback
+    const localData = getLocalTickets();
+    const existing = localData[normalized];
+    if (!existing) {
+      return { ok: false, error: `Ticket ${code} not found.` };
+    }
+
+    existing.entered = entered;
+    existing.enteredAt = entered ? (existing.enteredAt || now) : '';
+    existing.updatedAt = now;
+    existing.updatedBy = staffId;
+
+    localData[normalized] = existing;
+    saveLocalTickets(localData);
+
+    return {
+      ok: true,
+      data: existing,
+      message: `Entry status updated to ${entered ? 'Entered' : 'Not Entered'}.`
+    };
+  }
+
+  /**
+   * 2. Clear One Ticket's Buyer Data
+   */
+  public async clearTicketData(
+    code: string,
+    reason: string = 'Manual ticket clear',
+    staffId: string = 'Ticket Register Reset'
+  ): Promise<ApiResponse<TicketRecord>> {
+    const normalized = normalizeTicketCode(code);
+    if (!isValidTicketCode(normalized)) {
+      return { ok: false, error: 'Invalid Ticket. Code outside approved range HOH001-HOH050.' };
+    }
+
+    const now = new Date().toISOString();
+
+    if (this.scriptUrl) {
+      try {
+        const res = await fetch(this.scriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'clearTicketData',
+            code: normalized,
+            reason: reason.trim(),
+            staffId
+          })
+        });
+
+        if (!res.ok) {
+          return { ok: false, error: 'Sync Failed. Please check your connection.' };
+        }
+
+        const json = await res.json();
+        const ticketData = json.ticket || json.data;
+
+        if (json && json.ok && ticketData) {
+          const localData = getLocalTickets();
+          localData[normalized] = ticketData;
+          saveLocalTickets(localData);
+          return { ok: true, data: ticketData, message: json.message || `Ticket ${code} data cleared successfully.` };
+        } else {
+          return { ok: false, error: json.error || 'Failed to clear ticket data.' };
+        }
+      } catch {
+        return { ok: false, error: 'Sync Failed. Please check your connection.' };
+      }
+    }
+
+    // Local Storage fallback
+    const localData = getLocalTickets();
+    const existing = localData[normalized];
+    const cleared: TicketRecord = {
+      code: normalized,
+      qrPayload: existing?.qrPayload || normalized,
+      buyerName: '',
+      phone: '',
+      email: '',
+      guests: 1,
+      paymentStatus: 'Pending',
+      amount: 0,
+      notes: '',
+      entered: false,
+      enteredAt: '',
+      registeredAt: '',
+      updatedAt: now,
+      updatedBy: staffId
+    };
+
+    localData[normalized] = cleared;
+    saveLocalTickets(localData);
+
+    return {
+      ok: true,
+      data: cleared,
+      message: `Ticket ${code} data cleared successfully.`
+    };
+  }
+
+  /**
+   * 3. Reset All Ticket Data with Automatic Backup
+   */
+  public async resetAllTicketData(
+    confirmation: string,
+    reason: string = 'Full event reset',
+    staffId: string = 'Ticket Register Admin'
+  ): Promise<ApiResponse<{ backupTab?: string }>> {
+    const cleanConfirmation = String(confirmation || '').trim();
+    if (cleanConfirmation !== 'RESET HOH EVENT') {
+      return { ok: false, error: 'Confirmation mismatch. You must type RESET HOH EVENT.' };
+    }
+
+    if (this.scriptUrl) {
+      try {
+        const res = await fetch(this.scriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'resetAllTicketData',
+            confirmation: cleanConfirmation,
+            reason: reason.trim(),
+            staffId
+          })
+        });
+
+        if (!res.ok) {
+          return { ok: false, error: 'Sync Failed. Please check your connection.' };
+        }
+
+        const json = await res.json();
+        if (json && json.ok) {
+          this.resetLocalDatabase();
+          return {
+            ok: true,
+            message: json.message || 'All ticket data reset successfully.',
+            data: { backupTab: json.backupTab }
+          };
+        } else {
+          return { ok: false, error: json.error || 'Failed to reset all tickets.' };
+        }
+      } catch {
+        return { ok: false, error: 'Sync Failed. Please check your connection.' };
+      }
+    }
+
+    // Local Storage fallback
+    this.resetLocalDatabase();
+    return {
+      ok: true,
+      message: 'All ticket data reset successfully in local storage.'
+    };
+  }
+
   public resetLocalDatabase(): Record<string, TicketRecord> {
     const clean = createDefaultTickets();
     saveLocalTickets(clean);

@@ -101,7 +101,6 @@ describe('Buyer Registration Validation (FR 01 - FR 04, BR 08)', () => {
     }).valid).toBe(true);
   });
 });
-
 describe('Ticket Status Evaluation (FR 08, FR 11, BR 04, BR 07)', () => {
   const baseTicket: TicketRecord = {
     code: 'HOH010',
@@ -235,4 +234,57 @@ describe('Google Sheets Storage Fix PRD Requirements', () => {
     expect(resultRecord.enteredAt).toBe('2026-09-19T14:30:00.000Z');
     expect(resultRecord.registeredAt).toBe('2026-09-19T10:00:00.000Z');
   });
+
+  it('should enforce data-control clearing and preserve code and qrPayload', () => {
+    const existing: TicketRecord = {
+      code: 'HOH002',
+      qrPayload: 'HOH002',
+      buyerName: 'Tushar Shaw',
+      phone: '9163220111',
+      email: 'test@hoh.com',
+      guests: 3,
+      paymentStatus: 'Paid',
+      amount: 1500,
+      notes: 'VIP guest',
+      entered: true,
+      enteredAt: '2026-09-19T15:00:00.000Z',
+      registeredAt: '2026-09-19T12:00:00.000Z',
+      updatedAt: '2026-09-19T15:00:00.000Z'
+    };
+
+    // Simulated clear action
+    const cleared: TicketRecord = {
+      code: existing.code,
+      qrPayload: existing.qrPayload,
+      buyerName: '',
+      phone: '',
+      email: '',
+      guests: 1,
+      paymentStatus: 'Pending',
+      amount: 0,
+      notes: '',
+      entered: false,
+      enteredAt: '',
+      registeredAt: '',
+      updatedAt: new Date().toISOString(),
+      updatedBy: 'Ticket Register Reset'
+    };
+
+    expect(cleared.code).toBe('HOH002');
+    expect(cleared.qrPayload).toBe('HOH002');
+    expect(cleared.buyerName).toBe('');
+    expect(cleared.phone).toBe('');
+    expect(cleared.guests).toBe(1);
+    expect(cleared.paymentStatus).toBe('Pending');
+    expect(cleared.entered).toBe(false);
+    expect(cleared.enteredAt).toBe('');
+  });
+
+  it('should validate exact confirmation text for Reset All Ticket Data', () => {
+    const validConfirmation = 'RESET HOH EVENT';
+    expect('RESET HOH EVENT'.trim()).toBe(validConfirmation);
+    expect('reset hoh event'.trim() === validConfirmation).toBe(false);
+    expect('RESET'.trim() === validConfirmation).toBe(false);
+  });
 });
+

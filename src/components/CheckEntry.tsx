@@ -4,7 +4,7 @@ import confetti from 'canvas-confetti';
 import {
   QrCode, Camera, CameraOff, Search, CheckCircle2, User, Phone, Users,
   IndianRupee, Clock, ArrowRight, ShieldCheck, RefreshCw, AlertCircle,
-  Upload, Sparkles, Volume2, VolumeX, AlertTriangle
+  Upload, Sparkles, Volume2, VolumeX, AlertTriangle, RotateCcw
 } from 'lucide-react';
 import { TicketRecord, TicketStatus } from '../types/ticket';
 import {
@@ -18,6 +18,7 @@ import { PaymentBadge, TicketStatusBanner } from './StatusBadge';
 interface CheckEntryProps {
   tickets: Record<string, TicketRecord>;
   onMarkEntered: (code: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
+  onSetEntryStatus?: (code: string, entered: boolean, reason?: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
   onNavigateToRegistration: (code: string) => void;
   staffRole?: string;
 }
@@ -25,6 +26,7 @@ interface CheckEntryProps {
 export const CheckEntry: React.FC<CheckEntryProps> = ({
   tickets,
   onMarkEntered,
+  onSetEntryStatus,
   onNavigateToRegistration,
   staffRole: _staffRole
 }) => {
@@ -102,40 +104,35 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
     }
   };
 
-  // Mark ticket as entered
+  // Handle gate admission confirmation
   const handleConfirmAdmission = async () => {
     if (!activeCode || isMarking) return;
-
     setIsMarking(true);
     setEntryMessage(null);
 
     try {
-      const result = await onMarkEntered(activeCode);
-      if (result.ok) {
-        setEntryMessage({ type: 'success', text: result.message || 'Admission Confirmed!' });
+      const res = await onMarkEntered(activeCode);
+      if (res.ok) {
+        setEntryMessage({ type: 'success', text: res.message || 'Admission confirmed! Marked Entered.' });
         playChime(true);
-
-        // Confetti celebration
         confetti({
-          particleCount: 80,
-          spread: 70,
-          origin: { y: 0.6 },
-          colors: ['#541D2B', '#E0A526', '#17623B', '#F7E7B4']
+          particleCount: 60,
+          spread: 60,
+          origin: { y: 0.6 }
         });
-
-        // Add to recent admissions list
-        const updatedTicket = tickets[activeCode];
-        setRecentAdmissions(prev => [
-          {
-            code: activeCode,
-            name: updatedTicket?.buyerName || 'Guest',
-            time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-            guests: updatedTicket?.guests || 1
-          },
-          ...prev.slice(0, 9)
-        ]);
+        if (currentTicket) {
+          setRecentAdmissions(prev => [
+            {
+              code: activeCode,
+              name: currentTicket.buyerName,
+              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              guests: currentTicket.guests
+            },
+            ...prev.slice(0, 7)
+          ]);
+        }
       } else {
-        setEntryMessage({ type: 'error', text: result.error || 'Failed to mark ticket entered.' });
+        setEntryMessage({ type: 'error', text: res.error || 'Admission denied.' });
         playChime(false);
       }
     } catch (err: unknown) {
@@ -144,6 +141,24 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
       playChime(false);
     } finally {
       setIsMarking(false);
+    }
+  };
+
+  // Direct manual toggle: change from Entered to Not Entered (Allow Re-entry)
+  const handleDirectResetNotEntered = async () => {
+    if (!activeCode || isMarking || !onSetEntryStatus) return;
+    setIsMarking(true);
+    setEntryMessage(null);
+
+    const res = await onSetEntryStatus(activeCode, false, 'Manual re-entry override at gate');
+    setIsMarking(false);
+
+    if (res.ok) {
+      setEntryMessage({ type: 'success', text: `Ticket ${activeCode} reset to Not Entered. It can now be admitted again.` });
+      playChime(true);
+    } else {
+      setEntryMessage({ type: 'error', text: res.error || 'Failed to update entry status.' });
+      playChime(false);
     }
   };
 
@@ -552,9 +567,25 @@ export const CheckEntry: React.FC<CheckEntryProps> = ({
                       )}
                     </button>
                   ) : ticketStatus === 'ALREADY_ENTERED' ? (
-                    <div className="w-full py-3.5 bg-rose-100 border-2 border-rose-400 text-rose-900 font-bold text-center rounded-xl flex items-center justify-center gap-2">
-                      <AlertCircle className="w-5 h-5 text-rose-700" />
-                      <span>ENTRY BLOCKED: ALREADY ADMITTED</span>
+                    <div className="space-y-2.5">
+                      <div className="w-full py-3.5 bg-rose-100 border-2 border-rose-400 text-rose-900 font-bold text-center rounded-xl flex items-center justify-center gap-2 shadow-sm">
+                        <AlertCircle className="w-5 h-5 text-rose-700" />
+                        <span>ENTRY BLOCKED: ALREADY ADMITTED</span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isMarking}
+                        onClick={handleDirectResetNotEntered}
+                        className="w-full py-3 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer disabled:opacity-50 active:scale-[0.99]"
+                        title="Directly reset to Not Entered so guest can be scanned again"
+                      >
+                        {isMarking ? (
+                          <RefreshCw className="w-4 h-4 animate-spin text-amber-800" />
+                        ) : (
+                          <RotateCcw className="w-4 h-4 text-amber-800" />
+                        )}
+                        <span>Change to "Not Entered" (Allow Re-Entry)</span>
+                      </button>
                     </div>
                   ) : (
                     <div className="w-full py-3 bg-stone-100 border border-stone-200 text-stone-500 font-semibold text-center rounded-xl text-sm">

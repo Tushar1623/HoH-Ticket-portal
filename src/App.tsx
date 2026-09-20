@@ -69,6 +69,19 @@ export function App() {
     return res;
   };
 
+  // Handle direct manual entry status toggle
+  const handleSetEntryStatus = async (code: string, entered: boolean, reason: string = 'Direct gate toggle') => {
+    const staffLabel = role === 'admin' ? 'Administrator' : role === 'sales' ? 'Sales Desk' : 'Gate Staff';
+    const res = await sheetClient.setEntryStatus(code, entered, reason, staffLabel);
+    if (res.ok && res.data) {
+      setTickets(prev => ({
+        ...prev,
+        [res.data!.code]: res.data!
+      }));
+    }
+    return res;
+  };
+
   // Reset database
   const handleResetDatabase = () => {
     const clean = sheetClient.resetLocalDatabase();
@@ -88,8 +101,8 @@ export function App() {
   const summary = useMemo(() => calculateSummary(tickets), [tickets]);
 
   return (
-    <div className="min-h-screen bg-hoh-warm text-hoh-text flex flex-col font-sans selection:bg-hoh-gold/30">
-      {/* Box Office Top Nav */}
+    <div className="min-h-screen bg-hoh-warm flex flex-col selection:bg-hoh-gold/30">
+      {/* Box Office Top Header */}
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -101,12 +114,12 @@ export function App() {
         }}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 py-4 sm:py-6">
+      {/* Main Box Office Viewport */}
+      <main className="flex-1 pb-16">
         {loading ? (
-          <div className="flex flex-col items-center justify-center min-h-[50vh] text-hoh-burgundy">
-            <RefreshCw className="w-8 h-8 animate-spin text-hoh-gold mb-3" />
-            <p className="font-serif font-bold text-lg">Loading House of Humour Box Office...</p>
+          <div className="min-h-[400px] flex flex-col items-center justify-center">
+            <RefreshCw className="w-8 h-8 text-hoh-burgundy animate-spin mb-2" />
+            <span className="text-sm font-semibold text-hoh-burgundy">Loading House of Humour Database...</span>
             <p className="text-xs text-stone-500 mt-1">Synchronizing 50 ticket allocations</p>
           </div>
         ) : (
@@ -115,6 +128,7 @@ export function App() {
               <CheckEntry
                 tickets={tickets}
                 onMarkEntered={handleMarkEntered}
+                onSetEntryStatus={handleSetEntryStatus}
                 onNavigateToRegistration={handleNavigateToRegistration}
                 staffRole={role}
               />
@@ -143,6 +157,7 @@ export function App() {
                 tickets={tickets}
                 onSelectTicketForEntry={handleNavigateToCheckEntry}
                 onSelectTicketForEdit={handleNavigateToRegistration}
+                onSetEntryStatus={handleSetEntryStatus}
                 onRefreshData={loadData}
               />
             )}

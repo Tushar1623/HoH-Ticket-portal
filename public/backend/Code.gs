@@ -12,6 +12,7 @@
 
 const TARGET_SPREADSHEET_ID = '1nJAMZQnqbsyciIHz-x4xaRiNzgcRPK861ae1No-tBGI';
 const SHEET_NAME = 'Tickets';
+const AUDIT_SHEET_NAME = 'Audit Log';
 
 // Required Header Names (Section 4 & 13)
 const REQUIRED_HEADERS = [
@@ -28,6 +29,17 @@ const REQUIRED_HEADERS = [
   'Entered At',
   'Registered At',
   'Updated At',
+  'Updated By'
+];
+
+// Audit Log Headers
+const AUDIT_HEADERS = [
+  'Timestamp',
+  'Action',
+  'Ticket Code',
+  'Previous Value',
+  'New Value',
+  'Reason',
   'Updated By'
 ];
 
@@ -242,6 +254,18 @@ function doPost(e) {
 
     if (action === 'markEntered') {
       return jsonResponse(markEnteredWithLock(payload));
+    }
+
+    if (action === 'setEntryStatus') {
+      return jsonResponse(setEntryStatusWithLock(payload));
+    }
+
+    if (action === 'clearTicketData') {
+      return jsonResponse(clearTicketDataWithLock(payload));
+    }
+
+    if (action === 'resetAllTicketData') {
+      return jsonResponse(resetAllTicketDataWithLock(payload));
     }
 
     return jsonResponse({ ok: false, error: 'Invalid or missing action in request' });
@@ -550,4 +574,326 @@ function isTruthy(val) {
 function jsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * =========================================================================
+ * AUDIT LOGGING & BACKUP UTILITIES
+ * =========================================================================
+ */
+
+function getOrCreateAuditSheet(ss) {
+  let auditSheet = ss.getSheetByName(AUDIT_SHEET_NAME);
+  if (!auditSheet) {
+    auditSheet = ss.insertSheet(AUDIT_SHEET_NAME);
+    const headerRange = auditSheet.getRange(1, 1, 1, AUDIT_HEADERS.length);
+    headerRange.setValues([AUDIT_HEADERS]);
+    headerRange.setFontWeight('bold');
+    headerRange.setBackground('#541D2B');
+    headerRange.setFontColor('#FFFFFF');
+    auditSheet.setFrozenRows(1);
+    auditSheet.autoResizeColumns(1, AUDIT_HEADERS.length);
+  }
+  return auditSheet;
+}
+
+function logAuditAction(ss, action, ticketCode, prevVal, newVal, reason, updatedBy) {
+  try {
+    const auditSheet = getOrCreateAuditSheet(ss);
+    const now = new Date().toISOString();
+    auditSheet.appendRow([
+      now,
+      String(action || ''),
+      String(ticketCode || ''),
+      String(prevVal !== undefined && prevVal !== null ? prevVal : ''),
+      String(newVal !== undefined && newVal !== null ? newVal : ''),
+      String(reason || ''),
+      String(updatedBy || 'Ticket Register')
+    ]);
+  } catch (err) {
+    Logger.log('Audit logging failed: ' + err.toString());
+  }
+}
+
+function createBackupSheet(ss) {
+  const sourceSheet = ss.getSheetByName(SHEET_NAME);
+  if (!sourceSheet) return null;
+
+  const d = new Date();
+  const pad = function(n) { return ('0' + n).slice(-2); };
+  const stamp = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '_' + pad(d.getHours()) + '-' + pad(d.getMinutes());
+  let backupName = 'Backup_' + stamp;
+
+  let counter = 1;
+  while (ss.getSheetByName(backupName)) {
+    backupName = 'Backup_' + stamp + '_' + counter;
+    counter++;
+  }
+
+  const backupSheet = sourceSheet.copyTo(ss);
+  backupSheet.setName(backupName);
+  return backupName;
+}
+
+/**
+ * =========================================================================
+ * DATA-CONTROL ACTIONS
+ * =========================================================================
+ */
+
+/**
+ * 1. Entry Status Toggle with mandatory reason
+ */
+function setEntryStatusWithLock(payload) {
+  const code = normalizeCode(payload.code);
+  if (!isValidCode(code)) {
+    return { ok: false, error: 'Invalid Ticket. Range must be HOH001 to HOH050.' };
+  }
+
+  const reason = String(payload.reason || 'Direct manual toggle').trim();
+  const targetEntered = isTruthy(payload.entered);
+  const staffId = payload.staffId || payload.updatedBy || 'Ticket Register Staff';
+
+  const lock = LockService.getDocumentLock();
+  try {
+    lock.waitLock(10000);
+
+    const ss = getSpreadsheet();
+    const sheet = getOrCreateSheet();
+    const colMap = getColumnMap(sheet);
+
+    const codeCol = colMap['Code'];
+    const lastRow = sheet.getLastRow();
+    let targetRow = -1;
+    let existing = null;
+
+    if (lastRow > 1) {
+      const codeValues = sheet.getRange(2, codeCol, lastRow - 1, 1).getValues();
+      for (let i = 0; i < codeValues.length; i++) {
+        if (normalizeCode(codeValues[i][0]) === code) {
+          targetRow = i + 2;
+          existing = readRow(sheet, targetRow, colMap);
+          break;
+        }
+      }
+    }
+
+    if (targetRow === -1 || !existing) {
+      return { ok: false, error: 'Ticket code ' + code + ' not found in sheet.' };
+    }
+
+    const prevEntered = existing.entered;
+    const now = new Date().toISOString();
+    const newEnteredAt = targetEntered ? (existing.enteredAt || now) : '';
+
+    sheet.getRange(targetRow, colMap['Entered']).setValue(targetEntered);
+    sheet.getRange(targetRow, colMap['Entered At']).setValue(newEnteredAt);
+    sheet.getRange(targetRow, colMap['Updated At']).setValue(now);
+    sheet.getRange(targetRow, colMap['Updated By']).setValue(staffId);
+
+    SpreadsheetApp.flush();
+
+    existing.entered = targetEntered;
+    existing.enteredAt = newEnteredAt;
+    existing.updatedAt = now;
+    existing.updatedBy = staffId;
+
+    // Log to Audit Log
+    logAuditAction(
+      ss,
+      'MANUAL_ENTRY_TOGGLE',
+      code,
+      prevEntered ? 'Entered' : 'Not Entered',
+      targetEntered ? 'Entered' : 'Not Entered',
+      reason,
+      staffId
+    );
+
+    return {
+      ok: true,
+      message: 'Entry status updated to ' + (targetEntered ? 'Entered' : 'Not Entered') + '.',
+      ticket: existing,
+      data: existing
+    };
+  } catch (err) {
+    return { ok: false, error: err.message || err.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * 2. Clear One Ticket's Buyer Data
+ */
+function clearTicketDataWithLock(payload) {
+  const code = normalizeCode(payload.code);
+  if (!isValidCode(code)) {
+    return { ok: false, error: 'Invalid Ticket. Range must be HOH001 to HOH050.' };
+  }
+
+  const reason = String(payload.reason || 'Manual single-ticket clear').trim();
+  const staffId = payload.staffId || payload.updatedBy || 'Ticket Register Reset';
+
+  const lock = LockService.getDocumentLock();
+  try {
+    lock.waitLock(10000);
+
+    const ss = getSpreadsheet();
+    const sheet = getOrCreateSheet();
+    const colMap = getColumnMap(sheet);
+
+    const codeCol = colMap['Code'];
+    const lastRow = sheet.getLastRow();
+    let targetRow = -1;
+    let existing = null;
+
+    if (lastRow > 1) {
+      const codeValues = sheet.getRange(2, codeCol, lastRow - 1, 1).getValues();
+      for (let i = 0; i < codeValues.length; i++) {
+        if (normalizeCode(codeValues[i][0]) === code) {
+          targetRow = i + 2;
+          existing = readRow(sheet, targetRow, colMap);
+          break;
+        }
+      }
+    }
+
+    if (targetRow === -1 || !existing) {
+      return { ok: false, error: 'Ticket code ' + code + ' not found in sheet.' };
+    }
+
+    const now = new Date().toISOString();
+
+    // Reset fields while preserving Code and QR Payload
+    sheet.getRange(targetRow, colMap['Buyer Name']).setValue('');
+    sheet.getRange(targetRow, colMap['Phone']).setValue('');
+    sheet.getRange(targetRow, colMap['Email']).setValue('');
+    sheet.getRange(targetRow, colMap['Guests']).setValue(1);
+    sheet.getRange(targetRow, colMap['Payment Status']).setValue('Pending');
+    sheet.getRange(targetRow, colMap['Amount']).setValue(0);
+    sheet.getRange(targetRow, colMap['Notes']).setValue('');
+    sheet.getRange(targetRow, colMap['Entered']).setValue(false);
+    sheet.getRange(targetRow, colMap['Entered At']).setValue('');
+    sheet.getRange(targetRow, colMap['Registered At']).setValue('');
+    sheet.getRange(targetRow, colMap['Updated At']).setValue(now);
+    sheet.getRange(targetRow, colMap['Updated By']).setValue(staffId);
+
+    SpreadsheetApp.flush();
+
+    const clearedRecord = {
+      code: code,
+      qrPayload: existing.qrPayload || code,
+      buyerName: '',
+      phone: '',
+      email: '',
+      guests: 1,
+      paymentStatus: 'Pending',
+      amount: 0,
+      notes: '',
+      entered: false,
+      enteredAt: '',
+      registeredAt: '',
+      updatedAt: now,
+      updatedBy: staffId
+    };
+
+    // Log to Audit Log
+    logAuditAction(
+      ss,
+      'CLEAR_TICKET_DATA',
+      code,
+      'Buyer: ' + (existing.buyerName || 'None') + ' | Status: ' + existing.paymentStatus + ' | Entered: ' + existing.entered,
+      'CLEARED (Available)',
+      reason,
+      staffId
+    );
+
+    return {
+      ok: true,
+      message: 'Ticket ' + code + ' data cleared successfully.',
+      ticket: clearedRecord,
+      data: clearedRecord
+    };
+  } catch (err) {
+    return { ok: false, error: err.message || err.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * 3. Reset All Ticket Data with Automatic Backup
+ */
+function resetAllTicketDataWithLock(payload) {
+  const confirmation = String(payload.confirmation || '').trim();
+  if (confirmation !== 'RESET HOH EVENT') {
+    return { ok: false, error: 'Confirmation mismatch. You must type RESET HOH EVENT.' };
+  }
+
+  const reason = String(payload.reason || 'Full event data reset').trim();
+  const staffId = payload.staffId || payload.updatedBy || 'Ticket Register Admin';
+
+  const lock = LockService.getDocumentLock();
+  try {
+    lock.waitLock(15000);
+
+    const ss = getSpreadsheet();
+    const sheet = getOrCreateSheet();
+    const colMap = getColumnMap(sheet);
+
+    // Step 1: Create Backup tab first
+    const backupName = createBackupSheet(ss);
+
+    // Step 2: Reset rows 2 to lastRow
+    const lastRow = sheet.getLastRow();
+    const now = new Date().toISOString();
+    const totalCols = REQUIRED_HEADERS.length;
+
+    if (lastRow > 1) {
+      const fullRange = sheet.getRange(2, 1, lastRow - 1, totalCols);
+      const values = fullRange.getValues();
+
+      for (let i = 0; i < values.length; i++) {
+        const row = values[i];
+        // Keep Code and QR Payload
+        // Reset buyer and entry columns (1-indexed in colMap, so 0-indexed is colMap[header] - 1)
+        row[colMap['Buyer Name'] - 1] = '';
+        row[colMap['Phone'] - 1] = '';
+        row[colMap['Email'] - 1] = '';
+        row[colMap['Guests'] - 1] = 1;
+        row[colMap['Payment Status'] - 1] = 'Pending';
+        row[colMap['Amount'] - 1] = 0;
+        row[colMap['Notes'] - 1] = '';
+        row[colMap['Entered'] - 1] = false;
+        row[colMap['Entered At'] - 1] = '';
+        row[colMap['Registered At'] - 1] = '';
+        row[colMap['Updated At'] - 1] = now;
+        row[colMap['Updated By'] - 1] = 'Ticket Register Reset';
+      }
+
+      fullRange.setValues(values);
+      SpreadsheetApp.flush();
+    }
+
+    // Step 3: Log to Audit Log
+    logAuditAction(
+      ss,
+      'RESET_ALL_TICKETS',
+      'ALL (HOH001-HOH050)',
+      'Active Event Data',
+      'RESET_TO_EMPTY (Backup: ' + backupName + ')',
+      reason,
+      staffId
+    );
+
+    return {
+      ok: true,
+      message: 'All ticket data reset successfully. Backup created in tab: ' + backupName,
+      backupTab: backupName
+    };
+  } catch (err) {
+    return { ok: false, error: err.message || err.toString() };
+  } finally {
+    lock.releaseLock();
+  }
 }
