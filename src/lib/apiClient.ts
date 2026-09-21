@@ -1,3 +1,12 @@
+const API_BASE_URL = (
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000"
+).replace(/\/$/, "");
+
+function apiUrl(path: string) {
+  return `${API_BASE_URL}${path}`;
+}
+
 export interface TodaySales {
   ticketsSold: number;
   bookings: number;
@@ -78,20 +87,7 @@ export interface ApiResponse<T = any> {
 const JWT_TOKEN_KEY = 'hoh_admin_token';
 const ADMIN_INFO_KEY = 'hoh_admin_info';
 
-/**
- * Resolve the backend base URL at build time.
- * - Production (Vercel): set VITE_API_URL=https://hoh-ticket-portal.onrender.com in Vercel env vars
- * - Local development: falls back to http://localhost:5000 (Vite proxy also handles /api/* → localhost:5000)
- * Never store secrets (MONGODB_URI, JWT_SECRET, ADMIN_PASSWORD) in VITE_* variables.
- */
-const API_BASE_URL = (
-  import.meta.env.VITE_API_URL ||
-  "http://localhost:5000"
-).replace(/\/$/, "");
 
-function apiUrl(path: string) {
-  return `${API_BASE_URL}${path}`;
-}
 
 class ApiClient {
   private token: string | null = null;
