@@ -80,11 +80,23 @@ const ADMIN_INFO_KEY = 'hoh_admin_info';
 
 /**
  * Resolve the backend base URL at build time.
- * - Development: VITE_API_URL is unset → '' → Vite proxy forwards /api/* to localhost:5000
- * - Production (Vercel): VITE_API_URL=https://hoh-ticket-portal.onrender.com
+ * - Production (Vercel): set VITE_API_URL=https://hoh-ticket-portal.onrender.com in Vercel env vars
+ * - Local development: falls back to http://localhost:5000 (Vite proxy also handles /api/* → localhost:5000)
  * Never store secrets (MONGODB_URI, JWT_SECRET, ADMIN_PASSWORD) in VITE_* variables.
  */
-const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const API_BASE_URL = (
+  import.meta.env.VITE_API_URL ||
+  'http://localhost:5000'
+).replace(/\/$/, '');
+
+
+/**
+ * Build an absolute API URL from a path.
+ * @example apiUrl('/api/auth/login') → 'https://hoh-ticket-portal.onrender.com/api/auth/login'
+ */
+function apiUrl(path: string): string {
+  return `${API_BASE_URL}${path}`;
+}
 
 class ApiClient {
   private token: string | null = null;
@@ -149,7 +161,7 @@ class ApiClient {
    */
   public async login(usernameOrEmail: string, password: string): Promise<ApiResponse<{ token: string; admin: any }>> {
     try {
-      const res = await fetch(`${API_BASE}/api/auth/login`, {
+      const res = await fetch(apiUrl('/api/auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ usernameOrEmail, password })
@@ -182,7 +194,7 @@ class ApiClient {
    */
   public async fetchDashboard(): Promise<ApiResponse<DashboardStats>> {
     try {
-      const res = await fetch(`${API_BASE}/api/dashboard`, {
+      const res = await fetch(apiUrl('/api/dashboard'), {
         headers: this.getHeaders()
       });
       const json = await res.json();
@@ -210,7 +222,7 @@ class ApiClient {
    */
   public async fetchTickets(params?: { search?: string; status?: string; entered?: boolean }): Promise<ApiResponse<TicketItem[]>> {
     try {
-      let url = `${API_BASE}/api/tickets`;
+      let url = apiUrl('/api/tickets');
       const searchParams = new URLSearchParams();
       if (params?.search) searchParams.append('search', params.search);
       if (params?.status) searchParams.append('status', params.status);
@@ -248,7 +260,7 @@ class ApiClient {
    */
   public async getTicket(code: string): Promise<ApiResponse<TicketItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(code)}`, {
+      const res = await fetch(apiUrl(`/api/tickets/${encodeURIComponent(code)}`), {
         headers: this.getHeaders()
       });
       const json = await res.json();
@@ -275,7 +287,7 @@ class ApiClient {
    */
   public async markEntered(code: string): Promise<ApiResponse<TicketItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(code)}/entry`, {
+      const res = await fetch(apiUrl(`/api/tickets/${encodeURIComponent(code)}/entry`), {
         method: 'PUT',
         headers: this.getHeaders()
       });
@@ -304,7 +316,7 @@ class ApiClient {
    */
   public async markNotEntered(code: string): Promise<ApiResponse<TicketItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(code)}/not-entry`, {
+      const res = await fetch(apiUrl(`/api/tickets/${encodeURIComponent(code)}/not-entry`), {
         method: 'PUT',
         headers: this.getHeaders()
       });
@@ -333,7 +345,7 @@ class ApiClient {
    */
   public async cancelTicket(code: string, reason: string = 'VOID'): Promise<ApiResponse<TicketItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(code)}/cancel`, {
+      const res = await fetch(apiUrl(`/api/tickets/${encodeURIComponent(code)}/cancel`), {
         method: 'PUT',
         headers: this.getHeaders(),
         body: JSON.stringify({ reason })
@@ -363,7 +375,7 @@ class ApiClient {
    */
   public async uncancelTicket(code: string): Promise<ApiResponse<TicketItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(code)}/uncancel`, {
+      const res = await fetch(apiUrl(`/api/tickets/${encodeURIComponent(code)}/uncancel`), {
         method: 'PUT',
         headers: this.getHeaders()
       });
@@ -412,7 +424,7 @@ class ApiClient {
         headers['Idempotency-Key'] = params.idempotencyKey;
       }
 
-      const res = await fetch(`${API_BASE}/api/bookings`, {
+      const res = await fetch(apiUrl('/api/bookings'), {
         method: 'POST',
         headers,
         body: JSON.stringify(params)
@@ -456,7 +468,7 @@ class ApiClient {
     availableTotal: number;
   }> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(anchorCode)}/preview-sale`, {
+      const res = await fetch(apiUrl(`/api/tickets/${encodeURIComponent(anchorCode)}/preview-sale`), {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ quantity, allowOverride })
@@ -486,7 +498,7 @@ class ApiClient {
     blockedTicket?: string;
   }> {
     try {
-      const res = await fetch(`${API_BASE}/api/bookings/preview`, {
+      const res = await fetch(apiUrl('/api/bookings/preview'), {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ quantity, startCode })
@@ -508,7 +520,7 @@ class ApiClient {
    */
   public async fetchBookings(): Promise<ApiResponse<BookingItem[]>> {
     try {
-      const res = await fetch(`${API_BASE}/api/bookings`, {
+      const res = await fetch(apiUrl('/api/bookings'), {
         headers: this.getHeaders()
       });
       const json = await res.json();
@@ -535,7 +547,7 @@ class ApiClient {
    */
   public async getBooking(id: string): Promise<ApiResponse<BookingItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/bookings/${encodeURIComponent(id)}`, {
+      const res = await fetch(apiUrl(`/api/bookings/${encodeURIComponent(id)}`), {
         headers: this.getHeaders()
       });
       const json = await res.json();
@@ -562,7 +574,7 @@ class ApiClient {
    */
   public async updateBooking(id: string, params: Partial<BookingItem>): Promise<ApiResponse<BookingItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/bookings/${encodeURIComponent(id)}`, {
+      const res = await fetch(apiUrl(`/api/bookings/${encodeURIComponent(id)}`), {
         method: 'PUT',
         headers: this.getHeaders(),
         body: JSON.stringify(params)
@@ -592,7 +604,7 @@ class ApiClient {
    */
   public async removeTicketFromBooking(bookingId: string, code: string, reason: string = 'Removed by admin'): Promise<ApiResponse<BookingItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/bookings/${encodeURIComponent(bookingId)}/tickets/${encodeURIComponent(code)}`, {
+      const res = await fetch(apiUrl(`/api/bookings/${encodeURIComponent(bookingId)}/tickets/${encodeURIComponent(code)}`), {
         method: 'DELETE',
         headers: this.getHeaders(),
         body: JSON.stringify({ reason })
@@ -629,7 +641,7 @@ class ApiClient {
     notes?: string;
   }): Promise<ApiResponse<TicketItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(code)}`, {
+      const res = await fetch(apiUrl(`/api/tickets/${encodeURIComponent(code)}`), {
         method: 'PUT',
         headers: this.getHeaders(),
         body: JSON.stringify(params)
@@ -659,7 +671,7 @@ class ApiClient {
    */
   public async verifyTicket(code: string): Promise<{ ok: boolean; ticket?: any; error?: string }> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/verify`, {
+      const res = await fetch(apiUrl('/api/tickets/verify'), {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ code: code.trim().toUpperCase() })
@@ -675,7 +687,7 @@ class ApiClient {
    */
   public async clearTicket(code: string, confirmEntered: boolean = false): Promise<ApiResponse<TicketItem>> {
     try {
-      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(code)}/booking`, {
+      const res = await fetch(apiUrl(`/api/tickets/${encodeURIComponent(code)}/booking`), {
         method: 'DELETE',
         headers: this.getHeaders(),
         body: JSON.stringify({ confirmEntered })
@@ -705,7 +717,7 @@ class ApiClient {
    */
   public async clearBooking(bookingCode: string, confirmEntered: boolean = false): Promise<ApiResponse<{ clearedTickets: string[] }>> {
     try {
-      const res = await fetch(`${API_BASE}/api/bookings/clear`, {
+      const res = await fetch(apiUrl('/api/bookings/clear'), {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ bookingCode, confirmEntered })
@@ -735,7 +747,7 @@ class ApiClient {
    */
   public async resetEvent(confirmText: string = 'RESET HOH EVENT'): Promise<ApiResponse<{ message: string; backupId?: string }>> {
     try {
-      const res = await fetch(`${API_BASE}/api/event/reset`, {
+      const res = await fetch(apiUrl('/api/event/reset'), {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ confirmText })
