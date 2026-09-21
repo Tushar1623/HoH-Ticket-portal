@@ -86,15 +86,10 @@ const ADMIN_INFO_KEY = 'hoh_admin_info';
  */
 const API_BASE_URL = (
   import.meta.env.VITE_API_URL ||
-  'http://localhost:5000'
-).replace(/\/$/, '');
+  "http://localhost:5000"
+).replace(/\/$/, "");
 
-
-/**
- * Build an absolute API URL from a path.
- * @example apiUrl('/api/auth/login') → 'https://hoh-ticket-portal.onrender.com/api/auth/login'
- */
-function apiUrl(path: string): string {
+function apiUrl(path: string) {
   return `${API_BASE_URL}${path}`;
 }
 
@@ -222,15 +217,14 @@ class ApiClient {
    */
   public async fetchTickets(params?: { search?: string; status?: string; entered?: boolean }): Promise<ApiResponse<TicketItem[]>> {
     try {
-      let url = apiUrl('/api/tickets');
       const searchParams = new URLSearchParams();
       if (params?.search) searchParams.append('search', params.search);
       if (params?.status) searchParams.append('status', params.status);
       if (params?.entered !== undefined) searchParams.append('entered', String(params.entered));
       const queryString = searchParams.toString();
-      if (queryString) url += `?${queryString}`;
+      const ticketPath = queryString ? `/api/tickets?${queryString}` : '/api/tickets';
 
-      const res = await fetch(url, {
+      const res = await fetch(apiUrl(ticketPath), {
         headers: this.getHeaders()
       });
       const json = await res.json();
