@@ -38,11 +38,23 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       }
     }
 
-    // Fallback credential check (ensures access even if Atlas connection is deferred/whitelisting)
+    // Fallback credential check — used when Atlas connection is deferred (e.g. IP whitelisting).
+    // SECURITY: Only ADMIN_PASSWORD env var is accepted. No hardcoded fallback passwords.
     if (!admin || !isMatch) {
-      const isDefaultAdmin = identifier === 'admin' || identifier === 'admin@houseofhumour.com';
-      const validPasswords = [env.ADMIN_PASSWORD, 'admin@HOH2025', 'hoh-admin-password-2026'].filter(Boolean);
-      if (isDefaultAdmin && validPasswords.includes(password)) {
+      const envPassword = env.ADMIN_PASSWORD;
+      if (!envPassword) {
+        // ADMIN_PASSWORD not configured — deny access entirely rather than risk an open backdoor.
+        res.status(401).json({
+          success: false,
+          error: {
+            code: 'INVALID_CREDENTIALS',
+            message: 'Invalid admin credentials.'
+          }
+        });
+        return;
+      }
+      const isDefaultAdmin = identifier === 'admin' || identifier === (env.ADMIN_EMAIL || 'admin@houseofhumour.com').toLowerCase();
+      if (isDefaultAdmin && password === envPassword) {
         admin = {
           _id: 'admin_root_id',
           username: 'admin',

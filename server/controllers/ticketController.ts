@@ -302,15 +302,9 @@ export const getTicketByCode = async (req: Request, res: Response): Promise<void
  * Zero secondary verification: immediate atomic update
  */
 export const markTicketEntered = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Entry mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const code = (req.params.code || req.body.code || '').toUpperCase().trim();
-    const result = localDataStore.markEntry(code);
-    if (!result.success) {
-      res.status(400).json({ success: false, error: { code: 'UPDATE_ERROR', message: result.message } });
-      return;
-    }
-    fastCache.invalidateAll();
-    res.json({ success: true, message: `Ticket ${code} marked as ENTERED.`, ticket: result.ticket, data: result.ticket });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -446,15 +440,9 @@ export const verifyTicket = async (req: Request, res: Response): Promise<void> =
  * Zero secondary verification: immediate atomic update
  */
 export const markTicketNotEntered = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Entry mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const code = (req.params.code || req.body.code || '').toUpperCase().trim();
-    const result = localDataStore.markNotEntered(code);
-    if (!result.success) {
-      res.status(400).json({ success: false, error: { code: 'UPDATE_ERROR', message: result.message } });
-      return;
-    }
-    fastCache.invalidateAll();
-    res.json({ success: true, message: `Ticket ${code} marked as NOT ENTERED.`, ticket: result.ticket, data: result.ticket });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -524,19 +512,9 @@ export const setEntryStatus = async (req: Request, res: Response): Promise<void>
  * Admin edit ticket customer details
  */
 export const updateTicket = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Ticket mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const code = (req.params.code || req.body.code || '').toUpperCase().trim();
-    const { buyerName, phone, email } = req.body;
-    const t = localDataStore.getTicketByCode(code);
-    if (!t) {
-      res.status(404).json({ success: false, error: { code: 'TICKET_NOT_FOUND', message: `Ticket ${code} not found.` } });
-      return;
-    }
-    if (buyerName !== undefined) t.buyerName = buyerName.trim() || null;
-    if (phone !== undefined) t.phone = phone.trim() || null;
-    if (email !== undefined) t.email = email.trim() || null;
-    t.status = t.buyerName ? 'registered' : 'available';
-    res.json({ success: true, message: `Ticket ${code} updated successfully.`, ticket: t, data: t });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -634,14 +612,9 @@ export const updateTicket = async (req: Request, res: Response): Promise<void> =
  * NEVER deletes the ticket document itself!
  */
 export const clearTicketBooking = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Ticket mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const code = (req.params.code || req.body.code || '').toUpperCase().trim();
-    const result = localDataStore.clearTicket(code);
-    if (!result.success) {
-      res.status(400).json({ success: false, error: { code: 'CLEAR_ERROR', message: result.message } });
-      return;
-    }
-    res.json({ success: true, message: `Ticket ${code} cleared and returned to available pool.`, ticket: result.ticket });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -736,22 +709,9 @@ export const clearTicketBooking = async (req: Request, res: Response): Promise<v
  * - Preserves HOH001–HOH050 and the Admin account!
  */
 export const resetEvent = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Event reset must persist to MongoDB. Never allow reset against local store.
   if (!isDbReady()) {
-    const confirmation = (req.body.confirmText || req.body.confirmation || '').trim();
-    if (confirmation !== 'RESET HOH EVENT') {
-      res.status(400).json({
-        success: false,
-        error: { code: 'CONFIRMATION_REQUIRED', message: 'Confirmation phrase "RESET HOH EVENT" is required to perform an event reset.' }
-      });
-      return;
-    }
-    const result = localDataStore.resetEvent(req.body.reason);
-    fastCache.invalidateAll();
-    res.json({
-      success: true,
-      message: 'All event bookings deleted. All 50 tickets reset to AVAILABLE. Backup snapshot created successfully.',
-      backupId: result.backupId
-    });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -850,15 +810,9 @@ export const resetEvent = async (req: Request, res: Response): Promise<void> => 
  * Cancel/void a physical ticket (LOST, DAMAGED, VOID, OTHER)
  */
 export const cancelTicket = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Cancellation must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const code = (req.params.code || '').toUpperCase().trim();
-    const reason = (req.body.reason || 'VOID').toUpperCase().trim();
-    const result = localDataStore.cancelTicket(code, reason);
-    if (!result.success) {
-      res.status(400).json({ success: false, error: { code: 'CANCEL_ERROR', message: result.message } });
-      return;
-    }
-    res.json({ success: true, message: `Ticket ${code} has been cancelled (${reason}).`, ticket: result.ticket, data: result.ticket });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -916,14 +870,9 @@ export const cancelTicket = async (req: Request, res: Response): Promise<void> =
  * Restore a cancelled ticket back to AVAILABLE
  */
 export const uncancelTicket = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Cancellation must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const code = (req.params.code || '').toUpperCase().trim();
-    const result = localDataStore.uncancelTicket(code);
-    if (!result.success) {
-      res.status(400).json({ success: false, error: { code: 'UNCANCEL_ERROR', message: result.message } });
-      return;
-    }
-    res.json({ success: true, message: `Ticket ${code} restored to AVAILABLE.`, ticket: result.ticket, data: result.ticket });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 

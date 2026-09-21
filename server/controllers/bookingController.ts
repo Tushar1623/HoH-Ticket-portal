@@ -123,47 +123,9 @@ export const previewBooking = previewSale;
  * Create physical ticket booking with anchor-driven consecutive ticket allocation
  */
 export const createBooking = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Booking creation must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const { buyerName, phone, email, ticketQuantity, quantity, anchorTicket, startCode, anchorTicketCode, paymentStatus, paymentMethod, amountPaid, notes } = req.body;
-    let ticketCodes = req.body.ticketCodes;
-    const qty = parseInt(ticketQuantity || quantity || (ticketCodes ? ticketCodes.length : 1), 10) || 1;
-    const anchor = (anchorTicket || startCode || anchorTicketCode || '').trim().toUpperCase();
-
-    if ((!ticketCodes || ticketCodes.length === 0) && anchor) {
-      const anchorNum = parseInt(anchor.replace('HOH', ''), 10);
-      ticketCodes = [];
-      for (let i = 0; i < qty; i++) {
-        ticketCodes.push(`HOH${String(anchorNum + i).padStart(3, '0')}`);
-      }
-    }
-
-    const result = localDataStore.createBooking({
-      buyerName,
-      phone,
-      email,
-      ticketQuantity: qty,
-      ticketCodes: ticketCodes || [],
-      paymentStatus,
-      paymentMethod,
-      amountPaid: Number(amountPaid) || 0,
-      notes
-    });
-    if (!result.success) {
-      res.status(400).json({ success: false, error: { code: 'BOOKING_FAILED', message: result.error } });
-      return;
-    }
-    fastCache.invalidateAll();
-    res.json({
-      success: true,
-      message: `Offline ticket sale registered successfully for ${buyerName}.`,
-      booking: result.booking,
-      tickets: result.tickets,
-      data: {
-        booking: result.booking,
-        tickets: (result.tickets || []).map((t: any) => t.code || t),
-        isConsecutive: true
-      }
-    });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -495,14 +457,9 @@ export const getBookingById = async (req: Request, res: Response): Promise<void>
  * Edit existing booking details
  */
 export const updateBooking = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Booking mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const bookingId = req.params.id;
-    const result = localDataStore.updateBooking(bookingId, req.body);
-    if (!result.success) {
-      res.status(404).json({ success: false, error: { code: 'UPDATE_FAILED', message: result.error } });
-      return;
-    }
-    res.json({ success: true, message: `Booking updated successfully.`, data: result.booking, booking: result.booking });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -658,14 +615,9 @@ export const removeTicketFromBooking = async (req: Request, res: Response): Prom
  * Clear entire booking and release all associated tickets
  */
 export const clearBooking = async (req: Request, res: Response): Promise<void> => {
+  // SECURITY: Booking mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
-    const { bookingCode } = req.body;
-    const result = localDataStore.clearBooking(bookingCode);
-    if (!result.success) {
-      res.status(404).json({ success: false, error: { code: 'CLEAR_FAILED', message: result.error } });
-      return;
-    }
-    res.json({ success: true, message: result.message });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 

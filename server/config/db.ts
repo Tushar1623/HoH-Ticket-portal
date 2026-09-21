@@ -6,11 +6,12 @@ dotenv.config();
 // mongoose.set('bufferCommands', false);
 
 export const connectDB = async (customUri?: string): Promise<typeof mongoose> => {
-  let uri = customUri || process.env.MONGO_URL || process.env.MONGODB_URI;
+  // Primary variable: MONGODB_URI. MONGO_URL is a legacy alias — accepted but not preferred.
+  // LOCAL_MONGODB_URI is NOT used in production. Do not fall back to localhost.
+  const uri = customUri || process.env.MONGODB_URI || process.env.MONGO_URL;
 
-  if (!uri || uri.includes('<db_password>')) {
-    console.warn('⚠️ No active MongoDB Atlas password found in MONGO_URL. Falling back to local MongoDB.');
-    uri = process.env.LOCAL_MONGODB_URI || 'mongodb://127.0.0.1:27017/hoh_tickets_db';
+  if (!uri) {
+    throw new Error('FATAL: MONGODB_URI environment variable is required to connect to the database.');
   }
 
   try {

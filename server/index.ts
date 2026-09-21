@@ -40,8 +40,6 @@ app.get('/health', (req, res) => {
     mode: isConnected ? 'cloud_atlas' : 'local_resilient_mode',
     host: mongoose.connection.host || null,
     dbName: mongoose.connection.name || null,
-    currentPublicIP: '152.56.156.152',
-    ipNotice: isConnected ? null : 'To connect directly to MongoDB Atlas, add your current IP (152.56.156.152) or 0.0.0.0/0 to Atlas Network Access.',
     timestamp: new Date().toISOString(),
     service: 'hoh-ticket-backend'
   });
