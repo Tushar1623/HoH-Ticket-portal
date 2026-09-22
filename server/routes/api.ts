@@ -14,7 +14,9 @@ import {
   clearTicketBooking,
   resetEvent,
   getDatabaseStatus,
-  getTestSaleReadiness
+  getTestSaleReadiness,
+  getTicketIntegrity,
+  testAll50Allocations
 } from '../controllers/ticketController';
 import {
   previewBooking,
@@ -41,6 +43,8 @@ router.get('/auth/me', authenticate, getMe);
 router.get('/dashboard', authenticate, getDashboardStats);
 router.get('/admin/database-status', authenticate, getDatabaseStatus);
 router.get('/admin/test-sale-readiness', authenticate, getTestSaleReadiness);
+router.get('/admin/ticket-integrity', authenticate, getTicketIntegrity);
+router.get('/admin/test-all-50-allocations', authenticate, testAll50Allocations);
 
 // --- Protected Ticket Routes ---
 router.get('/tickets', authenticate, getTickets);

@@ -1028,6 +1028,186 @@ export const getTestSaleReadiness = async (req: Request, res: Response): Promise
   }
 };
 
+/**
+ * GET /api/admin/ticket-integrity
+ * Complete diagnostic endpoint querying MongoDB directly to audit all 50 physical tickets
+ */
+export const getTicketIntegrity = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
+    return;
+  }
+
+  try {
+    const allTickets = await Ticket.find({}).sort({ serialNumber: 1 }).lean();
+    const allBookings = await Booking.find({}, { _id: 1, bookingCode: 1, ticketCodes: 1 }).lean();
+    const bookingIdMap = new Map(allBookings.map(b => [String(b._id), b]));
+
+    const expectedCodes = Array.from({ length: 50 }, (_, i) => `HOH${String(i + 1).padStart(3, '0')}`);
+    const existingCodes = new Set(allTickets.map(t => t.code.toUpperCase()));
+    const missingCodes = expectedCodes.filter(c => !existingCodes.has(c));
+
+    // Detect duplicate codes
+    const duplicateAgg = await Ticket.aggregate([
+      { $group: { _id: "$code", count: { $sum: 1 } } },
+      { $match: { count: { $gt: 1 } } }
+    ]);
+    const duplicateCodes = duplicateAgg.map(d => d._id);
+
+    const invalidSerialNumbers: string[] = [];
+    const invalidStatuses: string[] = [];
+    const registeredTickets: string[] = [];
+    const cancelledTickets: string[] = [];
+    const orphanBookings: string[] = [];
+
+    const validStatuses = ['available', 'registered', 'entered', 'cancelled'];
+
+    for (const t of allTickets) {
+      const match = t.code.match(/^HOH(\d+)$/i);
+      const expectedNum = match ? parseInt(match[1], 10) : -1;
+      if (t.serialNumber !== expectedNum || t.serialNumber < 1 || t.serialNumber > 50) {
+        invalidSerialNumbers.push(t.code);
+      }
+
+      if (!validStatuses.includes(t.status)) {
+        invalidStatuses.push(t.code);
+      }
+
+      if (t.status === 'registered' || t.status === 'entered' || t.bookingId !== null) {
+        registeredTickets.push(t.code);
+      }
+
+      if (t.status === 'cancelled') {
+        cancelledTickets.push(t.code);
+      }
+
+      // Check orphan bookings
+      if (t.bookingId && !bookingIdMap.has(String(t.bookingId))) {
+        orphanBookings.push(`Ticket ${t.code} references nonexistent bookingId ${t.bookingId}`);
+      }
+    }
+
+    // Also check bookings referencing missing tickets
+    const ticketCodeSet = new Set(allTickets.map(t => t.code));
+    for (const b of allBookings) {
+      if (Array.isArray(b.ticketCodes)) {
+        for (const tc of b.ticketCodes) {
+          if (!ticketCodeSet.has(tc)) {
+            orphanBookings.push(`Booking ${b.bookingCode} references missing ticket ${tc}`);
+          }
+        }
+      }
+    }
+
+    // Do NOT expose customer phone/email unnecessarily
+    const sanitizedTickets = allTickets.map(t => ({
+      code: t.code,
+      serialNumber: t.serialNumber,
+      status: t.status,
+      bookingId: t.bookingId ? String(t.bookingId) : null,
+      buyerName: t.buyerName || null
+    }));
+
+    res.json({
+      success: true,
+      total: allTickets.length,
+      missingCodes,
+      duplicateCodes,
+      invalidSerialNumbers,
+      invalidStatuses,
+      registeredTickets,
+      cancelledTickets,
+      orphanBookings,
+      tickets: sanitizedTickets
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'INTEGRITY_CHECK_ERROR',
+        message: 'Ticket integrity inspection failed: ' + err.message
+      }
+    });
+  }
+};
+
+/**
+ * GET /api/admin/test-all-50-allocations
+ * Non-destructive admin diagnostic to test anchor allocation for all 50 tickets HOH001-HOH050
+ */
+export const testAll50Allocations = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
+    return;
+  }
+
+  try {
+    const { findConsecutiveFromAnchor } = await import('../services/allocationService');
+    const allTickets = await Ticket.find({}).lean();
+    const ticketMap = new Map(allTickets.map(t => [t.code, t]));
+
+    const results: Array<{
+      code: string;
+      status: 'PASS' | 'FAIL';
+      ticketStatus: string;
+      allocatedTickets?: string[];
+      reason?: string;
+    }> = [];
+
+    let passedCount = 0;
+    let failedCount = 0;
+
+    for (let i = 1; i <= 50; i++) {
+      const code = `HOH${String(i).padStart(3, '0')}`;
+      const doc = ticketMap.get(code);
+
+      if (!doc) {
+        results.push({ code, status: 'FAIL', ticketStatus: 'MISSING', reason: 'Ticket does not exist' });
+        failedCount++;
+        continue;
+      }
+
+      const alloc = await findConsecutiveFromAnchor(code, 1);
+      const isAvailable = (doc.status === 'available' || String(doc.status).toLowerCase() === 'available') && doc.bookingId === null;
+
+      if (isAvailable) {
+        if (alloc.success && alloc.tickets.length === 1 && alloc.tickets[0].code === code) {
+          results.push({ code, status: 'PASS', ticketStatus: doc.status, allocatedTickets: [code] });
+          passedCount++;
+        } else {
+          results.push({ code, status: 'FAIL', ticketStatus: doc.status, reason: alloc.message || 'Allocation failed for available ticket' });
+          failedCount++;
+        }
+      } else {
+        // For registered or cancelled tickets, findConsecutiveFromAnchor should safely reject with proper reason
+        if (!alloc.success && (alloc.reason === 'ANCHOR_ALREADY_REGISTERED' || alloc.reason === 'ANCHOR_CANCELLED')) {
+          results.push({ code, status: 'PASS', ticketStatus: doc.status, reason: alloc.reason });
+          passedCount++;
+        } else {
+          results.push({ code, status: 'FAIL', ticketStatus: doc.status, reason: `Unexpected allocation result for ${doc.status} ticket: success=${alloc.success}` });
+          failedCount++;
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      total: 50,
+      passed: passedCount,
+      failed: failedCount,
+      results
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'ALLOCATION_TEST_ERROR',
+        message: 'Failed to run 50-ticket allocation test: ' + err.message
+      }
+    });
+  }
+};
+
 // Compatibility aliases
 export const clearTicket = clearTicketBooking;
 export const clearEventData = resetEvent;

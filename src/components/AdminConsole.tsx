@@ -150,7 +150,14 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
       ]);
 
       if (ticketsRes.success && ticketsRes.data) {
-        setTickets(ticketsRes.data);
+        const loadedTickets = ticketsRes.data;
+        const expectedCodes = new Set(Array.from({ length: 50 }, (_, i) => `HOH${String(i + 1).padStart(3, '0')}`));
+        const allPresent = loadedTickets.length === 50 && loadedTickets.every(t => expectedCodes.has(t.code));
+
+        if (!allPresent && loadedTickets.length > 0) {
+          showToast('error', 'Ticket inventory synchronization error. Refreshing live inventory...');
+        }
+        setTickets(loadedTickets);
       } else if (ticketsRes.error && !silent) {
         showToast('error', ticketsRes.error.message);
       }
@@ -252,6 +259,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
 
   // Open Sale Modal from Anchor Ticket
   const openSaleModalWithAnchor = (ticket: TicketItem) => {
+    console.log(`[SALE_ANCHOR_SELECTED] ${ticket.code}`);
     const newKey = typeof crypto !== 'undefined' && crypto.randomUUID
       ? crypto.randomUUID()
       : `sale_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -315,6 +323,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
   const handleConfirmSale = async () => {
     if (actionLoading === 'confirm-sale') return;
 
+    console.log(`[SALE_ANCHOR_SUBMIT] ${saleAnchor}`);
     console.log("[SALE_UI_SUBMIT]", {
       anchorTicket: saleAnchor,
       quantity: saleQuantity,

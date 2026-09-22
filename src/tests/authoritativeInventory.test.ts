@@ -5,9 +5,18 @@ import { Ticket } from '../../server/models/Ticket';
 import { Booking } from '../../server/models/Booking';
 import { Counter } from '../../server/models/Counter';
 import { IdempotencyKey } from '../../server/models/IdempotencyKey';
-import { getAvailableTickets, countAvailableTickets } from '../../server/services/allocationService';
-import { getDashboardStats, getDatabaseStatus, getTestSaleReadiness, markTicketEntered, markTicketNotEntered } from '../../server/controllers/ticketController';
+import { getAvailableTickets, countAvailableTickets, findConsecutiveFromAnchor } from '../../server/services/allocationService';
+import {
+  getDashboardStats,
+  getDatabaseStatus,
+  getTestSaleReadiness,
+  getTicketIntegrity,
+  testAll50Allocations,
+  markTicketEntered,
+  markTicketNotEntered
+} from '../../server/controllers/ticketController';
 import { createBooking } from '../../server/controllers/bookingController';
+import { initializeDatabase } from '../../server/services/initService';
 
 describe('Authoritative MongoDB Inventory & Database Diagnostic Tests', () => {
   beforeEach(() => {
@@ -512,5 +521,391 @@ describe('Authoritative MongoDB Inventory & Database Diagnostic Tests', () => {
         code: 'ANCHOR_ALREADY_REGISTERED'
       })
     }));
+  });
+
+  it('TEST 12: getTicketIntegrity endpoint returns all 50 tickets and zero invalid records for healthy inventory', async () => {
+    vi.spyOn(mongoose.connection, 'readyState', 'get').mockReturnValue(1 as any);
+
+    const mock50Tickets = Array.from({ length: 50 }, (_, i) => ({
+      _id: new Types.ObjectId(),
+      code: `HOH${String(i + 1).padStart(3, '0')}`,
+      serialNumber: i + 1,
+      status: i === 0 ? 'registered' : 'available',
+      bookingId: i === 0 ? new Types.ObjectId() : null,
+      buyerName: i === 0 ? 'Rahul Sharma' : null,
+      phone: i === 0 ? '9876543210' : null,
+      email: i === 0 ? 'rahul@example.com' : null
+    }));
+
+    const mockBooking = {
+      _id: mock50Tickets[0].bookingId,
+      bookingCode: 'HOH-BKG-0001',
+      ticketCodes: ['HOH001']
+    };
+
+    vi.spyOn(Ticket, 'find').mockReturnValue({
+      sort: vi.fn().mockReturnValue({
+        lean: vi.fn().mockResolvedValue(mock50Tickets)
+      })
+    } as any);
+
+    vi.spyOn(Booking, 'find').mockReturnValue({
+      lean: vi.fn().mockResolvedValue([mockBooking])
+    } as any);
+
+    vi.spyOn(Ticket, 'aggregate').mockResolvedValue([]);
+
+    const req: any = {};
+    const res: any = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn()
+    };
+
+    await getTicketIntegrity(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      success: true,
+      total: 50,
+      missingCodes: [],
+      duplicateCodes: [],
+      invalidSerialNumbers: [],
+      invalidStatuses: [],
+      registeredTickets: ['HOH001'],
+      cancelledTickets: [],
+      orphanBookings: [],
+      tickets: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'HOH001',
+          serialNumber: 1,
+          status: 'registered',
+          buyerName: 'Rahul Sharma'
+        }),
+        expect.objectContaining({
+          code: 'HOH050',
+          serialNumber: 50,
+          status: 'available',
+          bookingId: null,
+          buyerName: null
+        })
+      ])
+    }));
+
+    // Verify phone/email are not leaked in diagnostic response
+    const jsonCall = res.json.mock.calls[0][0];
+    expect(jsonCall.tickets[0].phone).toBeUndefined();
+    expect(jsonCall.tickets[0].email).toBeUndefined();
+  });
+
+  it('TEST 13: testAll50Allocations tests anchor allocation for every ticket HOH001-HOH050', async () => {
+    vi.spyOn(mongoose.connection, 'readyState', 'get').mockReturnValue(1 as any);
+
+    const mock50Tickets = Array.from({ length: 50 }, (_, i) => ({
+      _id: new Types.ObjectId(),
+      code: `HOH${String(i + 1).padStart(3, '0')}`,
+      serialNumber: i + 1,
+      status: 'available',
+      bookingId: null
+    }));
+
+    vi.spyOn(Ticket, 'find').mockReturnValue({
+      lean: vi.fn().mockResolvedValue(mock50Tickets)
+    } as any);
+
+    vi.spyOn(Ticket, 'findOne').mockImplementation(((filter: any) => {
+      const code = filter.code;
+      const found = mock50Tickets.find(t => t.code === code);
+      const q: any = {
+        session: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue(found || null)
+      };
+      q.then = (resolve: any) => Promise.resolve(found || null).then(resolve);
+      return q;
+    }) as any);
+
+    const req: any = {};
+    const res: any = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn()
+    };
+
+    await testAll50Allocations(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      success: true,
+      total: 50,
+      passed: 50,
+      failed: 0,
+      results: expect.arrayContaining([
+        expect.objectContaining({ code: 'HOH001', status: 'PASS' }),
+        expect.objectContaining({ code: 'HOH002', status: 'PASS' }),
+        expect.objectContaining({ code: 'HOH025', status: 'PASS' }),
+        expect.objectContaining({ code: 'HOH050', status: 'PASS' })
+      ])
+    }));
+  });
+
+  it('TEST 14: findConsecutiveFromAnchor allocates arbitrary anchor codes without defaulting to HOH001', async () => {
+    const mock50 = Array.from({ length: 50 }, (_, i) => ({
+      _id: new Types.ObjectId(),
+      code: `HOH${String(i + 1).padStart(3, '0')}`,
+      serialNumber: i + 1,
+      status: 'available',
+      bookingId: null
+    }));
+
+    vi.spyOn(Ticket, 'findOne').mockImplementation(((filter: any) => {
+      const found = mock50.find(t => t.code === filter.code);
+      const q: any = {
+        session: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue(found || null)
+      };
+      q.then = (resolve: any) => Promise.resolve(found || null).then(resolve);
+      return q;
+    }) as any);
+
+    vi.spyOn(Ticket, 'find').mockImplementation(((filter: any) => {
+      const serials = filter.serialNumber?.$in || [];
+      const found = mock50.filter(t => serials.includes(t.serialNumber));
+      const q: any = {
+        session: vi.fn().mockReturnThis(),
+        sort: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue(found)
+      };
+      q.then = (resolve: any) => Promise.resolve(found).then(resolve);
+      return q;
+    }) as any);
+
+    // Test HOH002 qty 1
+    const resHOH002 = await findConsecutiveFromAnchor('HOH002', 1);
+    expect(resHOH002.success).toBe(true);
+    expect(resHOH002.tickets[0].code).toBe('HOH002');
+
+    // Test HOH010 qty 1
+    const resHOH010 = await findConsecutiveFromAnchor('HOH010', 1);
+    expect(resHOH010.success).toBe(true);
+    expect(resHOH010.tickets[0].code).toBe('HOH010');
+
+    // Test HOH025 qty 1
+    const resHOH025 = await findConsecutiveFromAnchor('HOH025', 1);
+    expect(resHOH025.success).toBe(true);
+    expect(resHOH025.tickets[0].code).toBe('HOH025');
+
+    // Test HOH050 qty 1
+    const resHOH050 = await findConsecutiveFromAnchor('HOH050', 1);
+    expect(resHOH050.success).toBe(true);
+    expect(resHOH050.tickets[0].code).toBe('HOH050');
+
+    // Test HOH010 qty 2 -> HOH010, HOH011
+    const resHOH010Qty2 = await findConsecutiveFromAnchor('HOH010', 2);
+    expect(resHOH010Qty2.success).toBe(true);
+    expect(resHOH010Qty2.tickets.map(t => t.code)).toEqual(['HOH010', 'HOH011']);
+
+    // Test HOH020 qty 3 -> HOH020, HOH021, HOH022
+    const resHOH020Qty3 = await findConsecutiveFromAnchor('HOH020', 3);
+    expect(resHOH020Qty3.success).toBe(true);
+    expect(resHOH020Qty3.tickets.map(t => t.code)).toEqual(['HOH020', 'HOH021', 'HOH022']);
+  });
+
+  it('TEST 15: createBooking successfully registers non-HOH001 tickets (HOH002, HOH003) atomically', async () => {
+    vi.spyOn(mongoose.connection, 'readyState', 'get').mockReturnValue(1 as any);
+
+    const mockSession: any = {
+      withTransaction: vi.fn().mockImplementation(async (cb: any) => cb()),
+      endSession: vi.fn().mockResolvedValue(undefined)
+    };
+    vi.spyOn(mongoose, 'startSession').mockResolvedValue(mockSession);
+
+    const ticketHOH002 = {
+      _id: new Types.ObjectId(),
+      code: 'HOH002',
+      serialNumber: 2,
+      status: 'available',
+      bookingId: null
+    };
+
+    const makeQuery = (data: any) => {
+      const q: any = {
+        session: vi.fn().mockReturnThis(),
+        lean: vi.fn().mockResolvedValue(data),
+        sort: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue(data)
+      };
+      q.then = (resolve: any) => Promise.resolve(data).then(resolve);
+      return q;
+    };
+
+    vi.spyOn(Ticket, 'findOne').mockImplementation(((filter: any) => {
+      if (filter.code === 'HOH002') return makeQuery(ticketHOH002);
+      return makeQuery(null);
+    }) as any);
+
+    vi.spyOn(Ticket, 'find').mockImplementation(((filter: any) => {
+      if (filter && filter.bookingId) {
+        return makeQuery([
+          {
+            _id: ticketHOH002._id,
+            code: 'HOH002',
+            serialNumber: 2,
+            status: 'registered',
+            bookingId: mockBookingId
+          }
+        ]);
+      }
+      return makeQuery([ticketHOH002]);
+    }) as any);
+
+    vi.spyOn(Counter, 'findByIdAndUpdate').mockImplementation(() => makeQuery({ seq: 2 }));
+    vi.spyOn(IdempotencyKey, 'findOne').mockImplementation(() => makeQuery(null));
+    vi.spyOn(IdempotencyKey, 'create').mockResolvedValue([] as any);
+
+    const mockBookingId = new Types.ObjectId();
+    const mockCreatedBooking = {
+      _id: mockBookingId,
+      bookingCode: 'HOH-BKG-000002',
+      buyerName: 'Aarav Gupta',
+      phone: '9876543210',
+      email: 'aarav@example.com',
+      ticketQuantity: 1,
+      ticketCodes: ['HOH002'],
+      anchorTicketCode: 'HOH002',
+      paymentMethod: 'UPI',
+      paymentStatus: 'PAID',
+      totalAmount: 500,
+      amountPaid: 500,
+      source: 'OFFLINE'
+    };
+
+    vi.spyOn(Booking, 'create').mockResolvedValue([mockCreatedBooking] as any);
+    vi.spyOn(Booking, 'findById').mockImplementation(() => makeQuery(mockCreatedBooking));
+
+    vi.spyOn(Ticket, 'updateMany').mockResolvedValue({
+      acknowledged: true,
+      modifiedCount: 1,
+      matchedCount: 1,
+      upsertedCount: 0,
+      upsertedId: null
+    } as any);
+
+    const req: any = {
+      headers: { 'idempotency-key': 'test-hoh002-sale' },
+      body: {
+        buyerName: 'Aarav Gupta',
+        phone: '9876543210',
+        email: 'aarav@example.com',
+        ticketQuantity: 1,
+        anchorTicket: 'HOH002',
+        paymentMethod: 'UPI',
+        paymentStatus: 'PAID',
+        totalAmount: 500,
+        amountPaid: 500
+      }
+    };
+    const res: any = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn()
+    };
+
+    await createBooking(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      success: true,
+      booking: expect.objectContaining({
+        ticketCodes: ['HOH002'],
+        buyerName: 'Aarav Gupta'
+      }),
+      tickets: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'HOH002',
+          status: 'registered'
+        })
+      ])
+    }));
+  });
+
+  it('TEST 16: initializeDatabase repairs malformed available tickets while preserving customer registered tickets', async () => {
+    vi.spyOn(mongoose.connection, 'readyState', 'get').mockReturnValue(1 as any);
+    vi.spyOn(Ticket, 'syncIndexes').mockResolvedValue(undefined as any);
+
+    const realCustomerBookingId = new Types.ObjectId();
+    const existingTicketsInDb = [
+      // HOH001 is a registered customer ticket
+      {
+        _id: new Types.ObjectId(),
+        code: 'HOH001',
+        serialNumber: 1,
+        status: 'registered',
+        bookingId: realCustomerBookingId,
+        buyerName: 'Existing Customer',
+        phone: '9999988888',
+        email: 'cust@example.com',
+        entered: false,
+        qrPayload: 'HOH001'
+      },
+      // HOH002 is an available ticket with malformed serialNumber (e.g. 1 instead of 2)
+      {
+        _id: new Types.ObjectId(),
+        code: 'HOH002',
+        serialNumber: 1, // MALFORMED!
+        status: 'AVAILABLE', // Uppercase
+        bookingId: null,
+        buyerName: null,
+        phone: null,
+        email: null,
+        entered: false
+      }
+    ];
+
+    const updateOneSpy = vi.spyOn(Ticket, 'updateOne').mockResolvedValue({} as any);
+    const createSpy = vi.spyOn(Ticket, 'create').mockResolvedValue({} as any);
+
+    vi.spyOn(Ticket, 'findOne').mockImplementation(((filter: any) => {
+      const regex = filter.code?.$regex;
+      const codeMatch = existingTicketsInDb.find(t => regex.test(t.code));
+      const q: any = {
+        exec: vi.fn().mockResolvedValue(codeMatch || null)
+      };
+      q.then = (resolve: any) => Promise.resolve(codeMatch || null).then(resolve);
+      return q;
+    }) as any);
+
+    vi.spyOn(Ticket, 'aggregate').mockResolvedValue([]);
+    vi.spyOn(mongoose.model('Admin'), 'countDocuments').mockResolvedValue(1 as any);
+    vi.spyOn(Counter, 'findById').mockResolvedValue({ _id: 'bookingCode', seq: 1 } as any);
+
+    // Mock the validation query returning all 50 clean tickets
+    const clean50 = Array.from({ length: 50 }, (_, i) => ({
+      _id: new Types.ObjectId(),
+      code: `HOH${String(i + 1).padStart(3, '0')}`,
+      serialNumber: i + 1,
+      status: i === 0 ? 'registered' : 'available',
+      bookingId: i === 0 ? realCustomerBookingId : null,
+      buyerName: i === 0 ? 'Existing Customer' : null,
+      entered: false
+    }));
+
+    vi.spyOn(Ticket, 'find').mockReturnValue({
+      sort: vi.fn().mockReturnValue({
+        lean: vi.fn().mockResolvedValue(clean50)
+      })
+    } as any);
+
+    await initializeDatabase();
+
+    // Verify HOH002 malformed ticket was repaired to serialNumber 2, status: 'available'
+    expect(updateOneSpy).toHaveBeenCalledWith(
+      { _id: existingTicketsInDb[1]._id },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          code: 'HOH002',
+          serialNumber: 2,
+          status: 'available',
+          bookingId: null
+        })
+      })
+    );
+
+    // Verify missing tickets (HOH003..HOH050) were created
+    expect(createSpy).toHaveBeenCalledTimes(48);
   });
 });
