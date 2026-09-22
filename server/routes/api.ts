@@ -13,7 +13,8 @@ import {
   uncancelTicket,
   clearTicketBooking,
   resetEvent,
-  getDatabaseStatus
+  getDatabaseStatus,
+  getTestSaleReadiness
 } from '../controllers/ticketController';
 import {
   previewBooking,
@@ -39,6 +40,7 @@ router.get('/auth/me', authenticate, getMe);
 // --- Protected Dashboard & Diagnostics ---
 router.get('/dashboard', authenticate, getDashboardStats);
 router.get('/admin/database-status', authenticate, getDatabaseStatus);
+router.get('/admin/test-sale-readiness', authenticate, getTestSaleReadiness);
 
 // --- Protected Ticket Routes ---
 router.get('/tickets', authenticate, getTickets);

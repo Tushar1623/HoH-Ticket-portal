@@ -183,6 +183,22 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         assignedTicketIds = allocation.tickets.map(t => t._id);
       }
 
+      // Explicitly verify candidate documents immediately before claiming inside transaction
+      const candidateCheck = await Ticket.find({
+        _id: { $in: assignedTicketIds },
+        status: 'available',
+        bookingId: null
+      }).session(session);
+
+      if (candidateCheck.length !== qty) {
+        const notAvailErr: any = new Error(
+          `Ticket ${anchor || 'selected'} is no longer available.`
+        );
+        notAvailErr.code = 'TICKET_NOT_AVAILABLE';
+        notAvailErr.status = 409;
+        throw notAvailErr;
+      }
+
       console.log(`[ALLOCATION_SUCCESS] tickets=${assignedTicketCodes.join(',')}`);
 
       // Step B: Generate unique booking code using transactional counter
@@ -204,7 +220,7 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         ? 'MANUAL'
         : 'CONSECUTIVE';
 
-      // Step C: Create Booking document in transaction
+      // Step C: Create Booking document in transaction and verify result
       const [booking] = await Booking.create(
         [
           {
@@ -227,6 +243,13 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         ],
         { session }
       );
+
+      if (!booking || !booking._id || !booking.bookingCode || !Array.isArray(booking.ticketCodes) || booking.ticketCodes.length !== qty) {
+        const createErr: any = new Error('Booking creation verification failed inside transaction.');
+        createErr.code = 'BOOKING_CREATE_FAILED';
+        createErr.status = 500;
+        throw createErr;
+      }
 
       savedBooking = booking;
 
@@ -256,7 +279,7 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
 
       if (updateResult.modifiedCount !== assignedTicketIds.length) {
         const conflictErr: any = new Error(
-          'One or more selected tickets were taken before the sale completed. No booking or ticket changes were saved.'
+          `One or more selected tickets were taken before the sale completed. Expected ${assignedTicketIds.length} modified, got ${updateResult.modifiedCount}.`
         );
         conflictErr.code = 'TICKET_CONFLICT';
         conflictErr.status = 409;
@@ -321,7 +344,31 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
     // Invalidate cache only AFTER successful transaction commit
     fastCache.invalidateAll();
 
+    // Step G: Fresh MongoDB reads to verify data integrity post-commit
     if (savedBooking) {
+      const freshBooking = await Booking.findById(savedBooking._id).lean();
+      const freshTickets = await Ticket.find({ bookingId: savedBooking._id }).lean();
+
+      const integrityValid = freshBooking &&
+        freshTickets.length === qty &&
+        freshTickets.every(t => t.status === 'registered' && String(t.bookingId) === String(savedBooking._id));
+
+      if (!integrityValid) {
+        console.error('[DATA_INTEGRITY_ERROR] Post-commit readback check failed:', {
+          bookingId: savedBooking._id,
+          expectedQty: qty,
+          foundTickets: freshTickets.length
+        });
+        res.status(500).json({
+          success: false,
+          error: {
+            code: 'DATA_INTEGRITY_ERROR',
+            message: 'Post-commit data integrity verification failed.'
+          }
+        });
+        return;
+      }
+
       logAudit({
         action: 'OFFLINE_SALE_CREATED',
         bookingId: savedBooking._id,
@@ -342,8 +389,27 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
 
     res.status(201).json(responsePayload);
   } catch (err: any) {
-    console.warn(`[BOOKING_TRANSACTION_ROLLBACK] reason=${err.message}`);
-    const statusCode = err.status || (err.code === 'TICKET_CONFLICT' ? 409 : 500);
+    console.warn(`[BOOKING_TRANSACTION_ROLLBACK] code=${err.code || 'UNKNOWN'} message=${err.message} mongoError=${err.name || 'Error'}`);
+
+    const isTransactionUnavailable = err.name === 'MongoServerError' && (
+      err.message?.includes('replica set') ||
+      err.message?.includes('transaction') ||
+      err.code === 20 ||
+      err.codeName === 'IllegalOperation'
+    );
+
+    if (isTransactionUnavailable) {
+      res.status(503).json({
+        success: false,
+        error: {
+          code: 'DATABASE_TRANSACTION_UNAVAILABLE',
+          message: 'MongoDB Atlas transaction support is unavailable. No ticket or booking was saved.'
+        }
+      });
+      return;
+    }
+
+    const statusCode = err.status || (err.code === 'TICKET_CONFLICT' || err.code === 'TICKET_NOT_AVAILABLE' ? 409 : 500);
     res.status(statusCode).json({
       success: false,
       error: {

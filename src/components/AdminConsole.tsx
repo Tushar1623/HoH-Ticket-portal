@@ -315,6 +315,17 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
   const handleConfirmSale = async () => {
     if (actionLoading === 'confirm-sale') return;
 
+    console.log('[SALE_FORM_SUBMIT_START]', {
+      anchorTicket: saleAnchor,
+      ticketQuantity: saleQuantity,
+      buyerName: saleBuyerName.trim(),
+      phone: salePhone.trim(),
+      paymentMethod: salePaymentMethod,
+      paymentStatus: salePaymentStatus,
+      totalAmount: saleTotalAmount,
+      amountPaid: saleAmountPaid
+    });
+
     if (!saleBuyerName.trim()) {
       showToast('error', 'Customer Full Name is required.');
       return;
@@ -334,6 +345,9 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
         ? crypto.randomUUID()
         : `sale_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
     );
+    if (!saleIdempotencyKey) {
+      setSaleIdempotencyKey(keyToSend);
+    }
 
     try {
       const res = await apiClient.registerBooking({
@@ -352,24 +366,32 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
       });
 
       if (res.success) {
-        showToast('success', res.message || `Sale confirmed for ${salePreview.proposedCodes.join(', ')}`);
+        const bookingResult = res.data?.booking;
+        const rawTickets = res.data?.tickets || salePreview.proposedCodes;
+        const bookingCode = bookingResult?.bookingCode || 'CONFIRMED';
+        const ticketCodesList = Array.isArray(rawTickets)
+          ? rawTickets.map((t: any) => (typeof t === 'string' ? t : t.code || String(t)))
+          : salePreview.proposedCodes;
+        const ticketCodesStr = ticketCodesList.join(', ');
+
+        showToast('success', `SALE SUCCESSFUL: Booking: ${bookingCode}, Ticket${ticketCodesList.length > 1 ? 's' : ''}: ${ticketCodesStr}`);
         setSaleIdempotencyKey('');
         setShowSaleModal(false);
         setScannedTicketResult(null);
-        const bookingResult = res.data?.booking;
-        const ticketsResult = res.data?.tickets || salePreview.proposedCodes;
+
         if (bookingResult) {
           setSaleSuccessData({
             booking: bookingResult,
-            tickets: ticketsResult
+            tickets: ticketCodesList
           });
         }
         await loadData();
       } else {
-        showToast('error', res.error?.message || 'Sale could not be completed.');
+        const errMsg = res.error?.message || 'Sale could not be completed.';
+        showToast('error', `SALE FAILED: ${errMsg}`);
       }
-    } catch {
-      showToast('error', 'Sale failed due to network or server error.');
+    } catch (err: any) {
+      showToast('error', `SALE FAILED: ${err?.message || 'Network or server error.'}`);
     } finally {
       setActionLoading(null);
     }

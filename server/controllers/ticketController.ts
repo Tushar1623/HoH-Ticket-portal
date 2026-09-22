@@ -965,6 +965,70 @@ export const getDatabaseStatus = async (req: Request, res: Response): Promise<vo
   }
 };
 
+/**
+ * GET /api/admin/test-sale-readiness
+ * Non-destructive admin diagnostic to verify MongoDB connection, transaction capability, and HOH001 status
+ */
+export const getTestSaleReadiness = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
+    return;
+  }
+
+  try {
+    // 1. Verify transaction capability non-destructively
+    let transactionSupported = false;
+    let transactionError: string | null = null;
+    try {
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(async () => {
+          await Ticket.findOne({ code: 'HOH001' }).session(session);
+        });
+        transactionSupported = true;
+      } finally {
+        await session.endSession();
+      }
+    } catch (txErr: any) {
+      transactionSupported = false;
+      transactionError = txErr.message;
+    }
+
+    // 2. Verify HOH001 existence and state without modifying data
+    const ticket001 = await Ticket.findOne({ code: 'HOH001' }).lean();
+
+    res.json({
+      success: true,
+      database: 'mongodb-atlas',
+      connected: true,
+      transactionSupported,
+      transactionError,
+      ticketHOH001: ticket001 ? {
+        exists: true,
+        code: ticket001.code,
+        serialNumber: ticket001.serialNumber,
+        status: ticket001.status,
+        isAvailable: ticket001.status === 'available' && ticket001.bookingId === null,
+        bookingId: ticket001.bookingId,
+        buyerName: ticket001.buyerName || null,
+        phone: ticket001.phone || null,
+        entered: ticket001.entered
+      } : {
+        exists: false
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'READINESS_CHECK_ERROR',
+        message: 'Diagnostic check failed: ' + err.message
+      }
+    });
+  }
+};
+
 // Compatibility aliases
 export const clearTicket = clearTicketBooking;
 export const clearEventData = resetEvent;
+

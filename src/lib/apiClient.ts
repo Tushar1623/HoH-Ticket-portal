@@ -446,6 +446,17 @@ class ApiClient {
     allowOverride?: boolean;
     idempotencyKey?: string;
   }): Promise<ApiResponse<{ booking: BookingItem; tickets: string[]; isConsecutive?: boolean }>> {
+    const anchor = params.anchorTicket || params.startCode || 'AUTO';
+    const qty = params.ticketQuantity || 1;
+    const hasIdemp = Boolean(params.idempotencyKey);
+
+    console.log('[SALE_API_REQUEST]', {
+      endpoint: '/api/bookings',
+      anchor,
+      quantity: qty,
+      idempotencyKeyPresent: hasIdemp
+    });
+
     try {
       const headers = this.getHeaders();
       if (params.idempotencyKey) {
@@ -457,22 +468,44 @@ class ApiClient {
         headers,
         body: JSON.stringify(params)
       });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
+
+      let json: any = null;
+      try {
+        json = await res.json();
+      } catch {
         return {
           success: false,
-          error: json.error || { code: 'BOOKING_FAILED', message: 'Registration failed.' }
+          error: {
+            code: `HTTP_${res.status}`,
+            message: `Server returned HTTP ${res.status} with non-JSON response.`
+          }
         };
       }
+
+      if (!res.ok || !json?.success) {
+        const errCode = json?.error?.code || `HTTP_${res.status}`;
+        const errMsg = json?.error?.message || json?.message || 'Registration failed.';
+        return {
+          success: false,
+          error: {
+            code: errCode,
+            message: errMsg
+          }
+        };
+      }
+
       return {
         success: true,
         data: json.data,
         message: json.message
       };
-    } catch {
+    } catch (networkErr: any) {
       return {
         success: false,
-        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+        error: {
+          code: 'NETWORK_ERROR',
+          message: networkErr?.message ? `Network request failed: ${networkErr.message}` : 'Unable to connect to database.'
+        }
       };
     }
   }
@@ -796,6 +829,54 @@ class ApiClient {
       return {
         success: false,
         error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Database diagnostic status check
+   */
+  public async getDatabaseStatus(): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(apiUrl('/api/admin/database-status'), {
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: `HTTP_${res.status}`, message: 'Failed to fetch database status.' }
+        };
+      }
+      return { success: true, data: json };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: err?.message || 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
+   * Diagnostic sale readiness test (non-destructive)
+   */
+  public async getTestSaleReadiness(): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(apiUrl('/api/admin/test-sale-readiness'), {
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return {
+          success: false,
+          error: json.error || { code: `HTTP_${res.status}`, message: 'Failed to perform readiness test.' }
+        };
+      }
+      return { success: true, data: json };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: err?.message || 'Unable to connect to database.' }
       };
     }
   }
