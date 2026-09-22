@@ -1,6 +1,8 @@
 const API_BASE_URL = (
   import.meta.env.VITE_API_URL ||
-  "http://localhost:5000"
+  (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+    ? 'https://hoh-ticket-portal.onrender.com'
+    : 'http://localhost:5000')
 ).replace(/\/$/, "");
 
 function apiUrl(path: string) {
@@ -449,9 +451,11 @@ class ApiClient {
     const anchor = params.anchorTicket || params.startCode || 'AUTO';
     const qty = params.ticketQuantity || 1;
     const hasIdemp = Boolean(params.idempotencyKey);
+    const targetUrl = apiUrl('/api/bookings');
 
     console.log('[SALE_API_REQUEST]', {
-      endpoint: '/api/bookings',
+      url: targetUrl,
+      method: 'POST',
       anchor,
       quantity: qty,
       idempotencyKeyPresent: hasIdemp
@@ -463,28 +467,35 @@ class ApiClient {
         headers['Idempotency-Key'] = params.idempotencyKey;
       }
 
-      const res = await fetch(apiUrl('/api/bookings'), {
+      const res = await fetch(targetUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify(params)
       });
 
+      const text = await res.text();
       let json: any = null;
       try {
-        json = await res.json();
+        json = JSON.parse(text);
       } catch {
+        json = null;
+      }
+
+      if (res.status === 401) {
+        console.warn('[SALE_API_RESPONSE]', { status: 401, error: 'UNAUTHORIZED' });
         return {
           success: false,
           error: {
-            code: `HTTP_${res.status}`,
-            message: `Server returned HTTP ${res.status} with non-JSON response.`
+            code: 'UNAUTHORIZED',
+            message: 'Admin session expired. Please log in again.'
           }
         };
       }
 
       if (!res.ok || !json?.success) {
         const errCode = json?.error?.code || `HTTP_${res.status}`;
-        const errMsg = json?.error?.message || json?.message || 'Registration failed.';
+        const errMsg = json?.error?.message || json?.message || (text && text.length < 300 ? text : `Request failed with HTTP ${res.status}`);
+        console.warn('[SALE_API_RESPONSE]', { status: res.status, code: errCode, message: errMsg });
         return {
           success: false,
           error: {
@@ -494,17 +505,20 @@ class ApiClient {
         };
       }
 
+      console.log('[SALE_API_RESPONSE]', { status: res.status, success: true, bookingCode: json.data?.booking?.bookingCode });
+
       return {
         success: true,
         data: json.data,
         message: json.message
       };
     } catch (networkErr: any) {
+      console.error('[SALE_API_NETWORK_ERROR]', networkErr);
       return {
         success: false,
         error: {
           code: 'NETWORK_ERROR',
-          message: networkErr?.message ? `Network request failed: ${networkErr.message}` : 'Unable to connect to database.'
+          message: 'Unable to reach the Render API.'
         }
       };
     }

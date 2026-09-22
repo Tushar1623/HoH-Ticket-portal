@@ -315,14 +315,13 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
   const handleConfirmSale = async () => {
     if (actionLoading === 'confirm-sale') return;
 
-    console.log('[SALE_FORM_SUBMIT_START]', {
+    console.log("[SALE_UI_SUBMIT]", {
       anchorTicket: saleAnchor,
-      ticketQuantity: saleQuantity,
-      buyerName: saleBuyerName.trim(),
-      phone: salePhone.trim(),
+      quantity: saleQuantity,
+      hasBuyerName: Boolean(saleBuyerName.trim()),
+      hasPhone: Boolean(salePhone.trim()),
       paymentMethod: salePaymentMethod,
       paymentStatus: salePaymentStatus,
-      totalAmount: saleTotalAmount,
       amountPaid: saleAmountPaid
     });
 
@@ -374,6 +373,11 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
           : salePreview.proposedCodes;
         const ticketCodesStr = ticketCodesList.join(', ');
 
+        console.log("[SALE_UI_SUCCESS]", {
+          bookingCode,
+          ticketCodes: ticketCodesStr
+        });
+
         showToast('success', `SALE SUCCESSFUL: Booking: ${bookingCode}, Ticket${ticketCodesList.length > 1 ? 's' : ''}: ${ticketCodesStr}`);
         setSaleIdempotencyKey('');
         setShowSaleModal(false);
@@ -388,9 +392,14 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
         await loadData();
       } else {
         const errMsg = res.error?.message || 'Sale could not be completed.';
+        console.warn("[SALE_UI_ERROR]", {
+          code: res.error?.code,
+          message: errMsg
+        });
         showToast('error', `SALE FAILED: ${errMsg}`);
       }
     } catch (err: any) {
+      console.error("[SALE_UI_ERROR]", err);
       showToast('error', `SALE FAILED: ${err?.message || 'Network or server error.'}`);
     } finally {
       setActionLoading(null);

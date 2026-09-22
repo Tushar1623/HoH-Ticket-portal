@@ -396,9 +396,15 @@ describe('Authoritative MongoDB Inventory & Database Diagnostic Tests', () => {
     } as any);
 
     vi.spyOn(Booking, 'create').mockResolvedValue([mockCreatedBooking] as any);
-    vi.spyOn(Booking, 'findById').mockReturnValue({
-      lean: vi.fn().mockResolvedValue(mockCreatedBooking)
-    } as any);
+    vi.spyOn(Booking, 'findById').mockImplementation(() => {
+      const q: any = {
+        session: vi.fn().mockReturnThis(),
+        lean: vi.fn().mockResolvedValue(mockCreatedBooking),
+        exec: vi.fn().mockResolvedValue(mockCreatedBooking)
+      };
+      q.then = (resolve: any) => Promise.resolve(mockCreatedBooking).then(resolve);
+      return q;
+    });
 
     vi.spyOn(Ticket, 'updateMany').mockResolvedValue({
       acknowledged: true,

@@ -67,12 +67,6 @@ export const previewBooking = previewSale;
  * Create physical ticket booking with ACID transactional ticket claiming and idempotency
  */
 export const createBooking = async (req: Request, res: Response): Promise<void> => {
-  if (!isDbReady()) {
-    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
-    return;
-  }
-
-  // 1. Validate request payload upfront
   const {
     buyerName,
     phone,
@@ -90,6 +84,21 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
     allowOverride = false
   } = req.body;
 
+  const qty = parseInt(ticketQuantity || quantity, 10);
+  const idempotencyKey = extractParam(req.headers['idempotency-key'] || req.body.idempotencyKey);
+  const anchor = extractParam(anchorTicket || startCode).toUpperCase();
+  const canOverride = allowNonConsecutive || allowOverride;
+
+  console.log(`[BOOKING_REQUEST_RECEIVED] anchor=${anchor || 'AUTO'} qty=${qty || 1} idempotencyKey=${idempotencyKey || 'none'}`);
+
+  if (!isDbReady()) {
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
+    return;
+  }
+
+  console.log('[BOOKING_DB_READY]');
+
+  // 1. Validate request payload upfront
   if (!buyerName || typeof buyerName !== 'string' || !buyerName.trim()) {
     res.status(400).json({
       success: false,
@@ -106,7 +115,6 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
     return;
   }
 
-  const qty = parseInt(ticketQuantity || quantity, 10);
   if (isNaN(qty) || qty < 1 || qty > 50) {
     res.status(400).json({
       success: false,
@@ -114,12 +122,6 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
     });
     return;
   }
-
-  const idempotencyKey = extractParam(req.headers['idempotency-key'] || req.body.idempotencyKey);
-  const anchor = extractParam(anchorTicket || startCode).toUpperCase();
-  const canOverride = allowNonConsecutive || allowOverride;
-
-  console.log(`[BOOKING_START] anchor=${anchor || 'AUTO'} qty=${qty} idempotencyKey=${idempotencyKey || 'none'}`);
 
   // 2. Check existing IdempotencyKey outside transaction to short-circuit fast duplicate retries
   if (idempotencyKey) {
@@ -137,13 +139,14 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
 
   // 3. Begin MongoDB Session & ACID Transaction
   const session = await mongoose.startSession();
-  let sessionCommitted = false;
 
   try {
     let responsePayload: any = null;
     let savedBooking: any = null;
     let assignedTicketCodes: string[] = [];
     let isConsecutive = true;
+
+    console.log('[BOOKING_TRANSACTION_START]');
 
     await session.withTransaction(async () => {
       // Re-check Idempotency inside transaction for strict race condition isolation
@@ -156,6 +159,7 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
       }
 
       // Step A: Perform ticket allocation using session
+      console.log(`[BOOKING_ALLOCATION_START] anchor=${anchor || 'AUTO'} qty=${qty}`);
       let assignedTicketIds: any[] = [];
 
       if (anchor) {
@@ -192,14 +196,14 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
 
       if (candidateCheck.length !== qty) {
         const notAvailErr: any = new Error(
-          `Ticket ${anchor || 'selected'} is no longer available.`
+          `${anchor || 'Selected ticket'} is no longer available.`
         );
         notAvailErr.code = 'TICKET_NOT_AVAILABLE';
         notAvailErr.status = 409;
         throw notAvailErr;
       }
 
-      console.log(`[ALLOCATION_SUCCESS] tickets=${assignedTicketCodes.join(',')}`);
+      console.log(`[BOOKING_ALLOCATION_SUCCESS] tickets=${assignedTicketCodes.join(',')}`);
 
       // Step B: Generate unique booking code using transactional counter
       const bookingCode = await getNextBookingCode(session);
@@ -251,6 +255,7 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         throw createErr;
       }
 
+      console.log(`[BOOKING_CREATED] bookingCode=${booking.bookingCode}`);
       savedBooking = booking;
 
       // Step D: Atomically and conditionally claim tickets inside transaction
@@ -284,6 +289,19 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         conflictErr.code = 'TICKET_CONFLICT';
         conflictErr.status = 409;
         throw conflictErr;
+      }
+
+      console.log(`[TICKETS_CLAIMED] count=${updateResult.modifiedCount} tickets=${assignedTicketCodes.join(',')}`);
+
+      // In-Transaction Verification before leaving withTransaction
+      const savedBookingInTx = await Booking.findById(booking._id).session(session);
+      const savedTicketsInTx = await Ticket.find({ bookingId: booking._id }).session(session);
+
+      if (!savedBookingInTx || savedTicketsInTx.length !== qty || !savedTicketsInTx.every(t => t.status === 'registered')) {
+        const integrityErr: any = new Error('In-transaction verification failed. Booking and ticket count mismatch.');
+        integrityErr.code = 'DATA_INTEGRITY_ERROR';
+        integrityErr.status = 500;
+        throw integrityErr;
       }
 
       // Step E: Construct definitive response
@@ -337,38 +355,12 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
       }
     });
 
-    sessionCommitted = true;
-
     console.log(`[BOOKING_TRANSACTION_COMMIT] bookingCode=${savedBooking?.bookingCode} tickets=${assignedTicketCodes.join(',')}`);
 
     // Invalidate cache only AFTER successful transaction commit
     fastCache.invalidateAll();
 
-    // Step G: Fresh MongoDB reads to verify data integrity post-commit
     if (savedBooking) {
-      const freshBooking = await Booking.findById(savedBooking._id).lean();
-      const freshTickets = await Ticket.find({ bookingId: savedBooking._id }).lean();
-
-      const integrityValid = freshBooking &&
-        freshTickets.length === qty &&
-        freshTickets.every(t => t.status === 'registered' && String(t.bookingId) === String(savedBooking._id));
-
-      if (!integrityValid) {
-        console.error('[DATA_INTEGRITY_ERROR] Post-commit readback check failed:', {
-          bookingId: savedBooking._id,
-          expectedQty: qty,
-          foundTickets: freshTickets.length
-        });
-        res.status(500).json({
-          success: false,
-          error: {
-            code: 'DATA_INTEGRITY_ERROR',
-            message: 'Post-commit data integrity verification failed.'
-          }
-        });
-        return;
-      }
-
       logAudit({
         action: 'OFFLINE_SALE_CREATED',
         bookingId: savedBooking._id,
@@ -390,6 +382,20 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
     res.status(201).json(responsePayload);
   } catch (err: any) {
     console.warn(`[BOOKING_TRANSACTION_ROLLBACK] code=${err.code || 'UNKNOWN'} message=${err.message} mongoError=${err.name || 'Error'}`);
+
+    if (err.name === 'ValidationError') {
+      const validationMessages = Object.values(err.errors || {})
+        .map((e: any) => e.message || String(e))
+        .join(', ');
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: validationMessages || err.message
+        }
+      });
+      return;
+    }
 
     const isTransactionUnavailable = err.name === 'MongoServerError' && (
       err.message?.includes('replica set') ||
