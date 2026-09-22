@@ -13,6 +13,11 @@ import {
 import { logAudit } from '../services/auditService';
 import { fastCache } from '../services/cacheService';
 
+function extractParam(val: any): string {
+  if (Array.isArray(val)) return String(val[0] || '').trim();
+  return String(val || '').trim();
+}
+
 function isDbReady(): boolean {
   return mongoose.connection.readyState === 1;
 }
@@ -21,7 +26,7 @@ const DB_UNAVAILABLE_RESPONSE = {
   success: false,
   error: {
     code: 'DATABASE_UNAVAILABLE',
-    message: 'MongoDB Atlas is unavailable.'
+    message: 'MongoDB Atlas is unavailable. No ticket or booking changes were saved.'
   }
 };
 
@@ -36,7 +41,7 @@ export const previewSale = async (req: Request, res: Response): Promise<void> =>
   }
 
   try {
-    const anchorCode = (req.params.code || req.body.anchorTicket || req.body.startCode || '').trim().toUpperCase();
+    const anchorCode = extractParam(req.params.code || req.body.anchorTicket || req.body.startCode).toUpperCase();
     const quantity = parseInt(req.body.quantity || req.body.ticketQuantity || req.body.count, 10) || 1;
     const allowOverride = req.body.allowOverride === true || req.body.allowNonConsecutive === true;
 
@@ -59,7 +64,7 @@ export const previewBooking = previewSale;
 
 /**
  * POST /api/bookings
- * Create physical ticket booking with anchor-driven consecutive ticket allocation
+ * Create physical ticket booking with ACID transactional ticket claiming and idempotency
  */
 export const createBooking = async (req: Request, res: Response): Promise<void> => {
   if (!isDbReady()) {
@@ -67,228 +72,287 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
     return;
   }
 
-  try {
-    // 1. Check Idempotency Key
-    const idempotencyKey = (req.headers['idempotency-key'] as string) || req.body.idempotencyKey;
-    if (idempotencyKey) {
+  // 1. Validate request payload upfront
+  const {
+    buyerName,
+    phone,
+    email = '',
+    ticketQuantity,
+    quantity,
+    anchorTicket,
+    startCode,
+    paymentStatus = 'PAID',
+    paymentMethod = 'CASH',
+    totalAmount = 0,
+    amountPaid,
+    notes = '',
+    allowNonConsecutive = false,
+    allowOverride = false
+  } = req.body;
+
+  if (!buyerName || typeof buyerName !== 'string' || !buyerName.trim()) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'MISSING_NAME', message: 'Customer full name is required.' }
+    });
+    return;
+  }
+
+  if (!phone || typeof phone !== 'string' || !phone.trim()) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'MISSING_PHONE', message: 'Customer phone number is required.' }
+    });
+    return;
+  }
+
+  const qty = parseInt(ticketQuantity || quantity, 10);
+  if (isNaN(qty) || qty < 1 || qty > 50) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_QUANTITY', message: 'Ticket quantity must be between 1 and 50.' }
+    });
+    return;
+  }
+
+  const idempotencyKey = extractParam(req.headers['idempotency-key'] || req.body.idempotencyKey);
+  const anchor = extractParam(anchorTicket || startCode).toUpperCase();
+  const canOverride = allowNonConsecutive || allowOverride;
+
+  console.log(`[BOOKING_START] anchor=${anchor || 'AUTO'} qty=${qty} idempotencyKey=${idempotencyKey || 'none'}`);
+
+  // 2. Check existing IdempotencyKey outside transaction to short-circuit fast duplicate retries
+  if (idempotencyKey) {
+    try {
       const existingKey = await IdempotencyKey.findOne({ key: idempotencyKey });
       if (existingKey && existingKey.response) {
+        console.log(`[IDEMPOTENCY_MATCH] key=${idempotencyKey} returning saved response.`);
         res.status(existingKey.statusCode || 200).json(existingKey.response);
         return;
       }
+    } catch (idempErr: any) {
+      console.warn('[IDEMPOTENCY_CHECK_WARN]', idempErr.message);
     }
+  }
 
-    const {
-      buyerName,
-      phone,
-      email = '',
-      ticketQuantity,
-      quantity,
-      anchorTicket,
-      startCode,
-      paymentStatus = 'PAID',
-      paymentMethod = 'CASH',
-      totalAmount = 0,
-      amountPaid,
-      notes = '',
-      allowNonConsecutive = false,
-      allowOverride = false
-    } = req.body;
+  // 3. Begin MongoDB Session & ACID Transaction
+  const session = await mongoose.startSession();
+  let sessionCommitted = false;
 
-    if (!buyerName || typeof buyerName !== 'string' || !buyerName.trim()) {
-      res.status(400).json({
-        success: false,
-        error: { code: 'MISSING_NAME', message: 'Customer full name is required.' }
-      });
-      return;
-    }
-
-    if (!phone || typeof phone !== 'string' || !phone.trim()) {
-      res.status(400).json({
-        success: false,
-        error: { code: 'MISSING_PHONE', message: 'Customer phone number is required.' }
-      });
-      return;
-    }
-
-    const qty = parseInt(ticketQuantity || quantity, 10);
-    if (isNaN(qty) || qty < 1 || qty > 50) {
-      res.status(400).json({
-        success: false,
-        error: { code: 'INVALID_QUANTITY', message: 'Ticket quantity must be between 1 and 50.' }
-      });
-      return;
-    }
-
-    const anchor = (anchorTicket || startCode || '').trim().toUpperCase();
-    const canOverride = allowNonConsecutive || allowOverride;
-
-    // 2. Perform allocation verification
+  try {
+    let responsePayload: any = null;
+    let savedBooking: any = null;
     let assignedTicketCodes: string[] = [];
-    let assignedTicketIds: any[] = [];
     let isConsecutive = true;
 
-    if (anchor) {
-      const allocation = await findConsecutiveFromAnchor(anchor, qty, undefined, canOverride);
-      if (!allocation.success || allocation.tickets.length !== qty) {
-        res.status(400).json({
-          success: false,
-          error: {
-            code: allocation.reason || 'ALLOCATION_FAILED',
-            message: allocation.message || `Could not allocate ${qty} tickets starting from ${anchor}.`,
-            blockedTicket: allocation.blockedTicket
-          }
-        });
-        return;
-      }
-      assignedTicketCodes = allocation.tickets.map(t => t.code);
-      assignedTicketIds = allocation.tickets.map(t => t._id);
-      isConsecutive = allocation.isConsecutive;
-    } else {
-      const allocation = await findConsecutiveTickets(qty, undefined, canOverride);
-      if (!allocation.success || allocation.tickets.length !== qty) {
-        res.status(400).json({
-          success: false,
-          error: {
-            code: 'ALLOCATION_FAILED',
-            message: allocation.error || `No consecutive block of ${qty} tickets is available.`,
-            availableSingles: allocation.availableSingles
-          }
-        });
-        return;
-      }
-      assignedTicketCodes = allocation.tickets.map(t => t.code);
-      assignedTicketIds = allocation.tickets.map(t => t._id);
-    }
-
-    // 3. Re-verify in MongoDB that none of these tickets have been taken concurrently
-    const currentTickets = await Ticket.find({ _id: { $in: assignedTicketIds } });
-    if (currentTickets.length !== assignedTicketIds.length) {
-      res.status(400).json({
-        success: false,
-        error: {
-          code: 'TICKETS_NOT_FOUND',
-          message: 'One or more selected tickets could not be found.'
+    await session.withTransaction(async () => {
+      // Re-check Idempotency inside transaction for strict race condition isolation
+      if (idempotencyKey) {
+        const existingTxKey = await IdempotencyKey.findOne({ key: idempotencyKey }).session(session);
+        if (existingTxKey && existingTxKey.response) {
+          responsePayload = existingTxKey.response;
+          return;
         }
-      });
-      return;
-    }
+      }
 
-    const unavailable = currentTickets.find(t => t.status !== 'available' || t.bookingId !== null);
-    if (unavailable) {
-      res.status(409).json({
-        success: false,
-        error: {
-          code: 'TICKET_CONFLICT',
-          message: `Sale could not be completed. Ticket ${unavailable.code} is no longer available. No tickets were registered.`
+      // Step A: Perform ticket allocation using session
+      let assignedTicketIds: any[] = [];
+
+      if (anchor) {
+        const allocation = await findConsecutiveFromAnchor(anchor, qty, session, canOverride);
+        if (!allocation.success || allocation.tickets.length !== qty) {
+          const allocErr: any = new Error(allocation.message || `Could not allocate ${qty} tickets starting from ${anchor}.`);
+          allocErr.code = allocation.reason || 'ALLOCATION_FAILED';
+          allocErr.status = 400;
+          allocErr.blockedTicket = allocation.blockedTicket;
+          throw allocErr;
         }
-      });
-      return;
-    }
+        assignedTicketCodes = allocation.tickets.map(t => t.code);
+        assignedTicketIds = allocation.tickets.map(t => t._id);
+        isConsecutive = allocation.isConsecutive;
+      } else {
+        const allocation = await findConsecutiveTickets(qty, session, canOverride);
+        if (!allocation.success || allocation.tickets.length !== qty) {
+          const allocErr: any = new Error(allocation.error || `No consecutive block of ${qty} tickets is available.`);
+          allocErr.code = 'ALLOCATION_FAILED';
+          allocErr.status = 400;
+          allocErr.availableSingles = allocation.availableSingles;
+          throw allocErr;
+        }
+        assignedTicketCodes = allocation.tickets.map(t => t.code);
+        assignedTicketIds = allocation.tickets.map(t => t._id);
+      }
 
-    // 4. Generate atomic collision-free booking code
-    const bookingCode = await getNextBookingCode();
+      console.log(`[ALLOCATION_SUCCESS] tickets=${assignedTicketCodes.join(',')}`);
 
-    const finalTotalAmount = Number(totalAmount) || 0;
-    const finalAmountPaid = amountPaid !== undefined ? Number(amountPaid) : finalTotalAmount;
-    const normPaymentMethod = (['CASH', 'UPI', 'CARD', 'OTHER'].includes(String(paymentMethod).toUpperCase())
-      ? String(paymentMethod).toUpperCase()
-      : 'CASH') as 'CASH' | 'UPI' | 'CARD' | 'OTHER';
+      // Step B: Generate unique booking code using transactional counter
+      const bookingCode = await getNextBookingCode(session);
 
-    const normPaymentStatus = (['PAID', 'PARTIAL', 'PENDING'].includes(String(paymentStatus).toUpperCase())
-      ? String(paymentStatus).toUpperCase()
-      : paymentStatus) as any;
+      const finalTotalAmount = Number(totalAmount) || 0;
+      const finalAmountPaid = amountPaid !== undefined ? Number(amountPaid) : finalTotalAmount;
+      const normPaymentMethod = (['CASH', 'UPI', 'CARD', 'OTHER'].includes(String(paymentMethod).toUpperCase())
+        ? String(paymentMethod).toUpperCase()
+        : 'CASH') as 'CASH' | 'UPI' | 'CARD' | 'OTHER';
 
-    const now = new Date();
+      const normPaymentStatus = (['PAID', 'PARTIAL', 'PENDING'].includes(String(paymentStatus).toUpperCase())
+        ? String(paymentStatus).toUpperCase()
+        : paymentStatus) as any;
 
-    const allocationMethod = (req.body.allocationMethod === 'MANUAL' || allowNonConsecutive || allowOverride || !isConsecutive)
-      ? 'MANUAL'
-      : 'CONSECUTIVE';
+      const now = new Date();
 
-    // 5. Create Booking document
-    const booking = await Booking.create({
-      bookingCode,
-      buyerName: buyerName.trim(),
-      phone: phone.trim(),
-      email: email.trim(),
-      ticketQuantity: qty,
-      ticketCodes: assignedTicketCodes,
-      anchorTicketCode: anchor || null,
-      allocationMethod,
-      paymentStatus: normPaymentStatus,
-      paymentMethod: normPaymentMethod,
-      totalAmount: finalTotalAmount,
-      amountPaid: finalAmountPaid,
-      notes: notes.trim(),
-      source: 'OFFLINE',
-      createdBy: req.user?.userId ? new mongoose.Types.ObjectId(req.user.userId) : undefined
-    });
+      const allocationMethod = (req.body.allocationMethod === 'MANUAL' || allowNonConsecutive || allowOverride || !isConsecutive)
+        ? 'MANUAL'
+        : 'CONSECUTIVE';
 
-    // 6. Atomically update all allocated tickets
-    await Ticket.updateMany(
-      { _id: { $in: assignedTicketIds } },
-      {
-        $set: {
-          bookingId: booking._id,
-          buyerName: buyerName.trim(),
-          phone: phone.trim(),
-          email: email.trim(),
+      // Step C: Create Booking document in transaction
+      const [booking] = await Booking.create(
+        [
+          {
+            bookingCode,
+            buyerName: buyerName.trim(),
+            phone: phone.trim(),
+            email: email.trim(),
+            ticketQuantity: qty,
+            ticketCodes: assignedTicketCodes,
+            anchorTicketCode: anchor || null,
+            allocationMethod,
+            paymentStatus: normPaymentStatus,
+            paymentMethod: normPaymentMethod,
+            totalAmount: finalTotalAmount,
+            amountPaid: finalAmountPaid,
+            notes: notes.trim(),
+            source: 'OFFLINE',
+            createdBy: req.user?.userId && mongoose.Types.ObjectId.isValid(req.user.userId) ? new mongoose.Types.ObjectId(req.user.userId) : undefined
+          }
+        ],
+        { session }
+      );
+
+      savedBooking = booking;
+
+      // Step D: Atomically and conditionally claim tickets inside transaction
+      // Must match status: 'available' and bookingId: null at update execution time!
+      const updateResult = await Ticket.updateMany(
+        {
+          _id: { $in: assignedTicketIds },
+          status: 'available',
+          bookingId: null
+        },
+        {
+          $set: {
+            bookingId: booking._id,
+            buyerName: buyerName.trim(),
+            phone: phone.trim(),
+            email: email.trim(),
+            status: 'registered',
+            registeredAt: now,
+            entered: false,
+            enteredAt: null,
+            entryCount: 0
+          }
+        },
+        { session }
+      );
+
+      if (updateResult.modifiedCount !== assignedTicketIds.length) {
+        const conflictErr: any = new Error(
+          'One or more selected tickets were taken before the sale completed. No booking or ticket changes were saved.'
+        );
+        conflictErr.code = 'TICKET_CONFLICT';
+        conflictErr.status = 409;
+        throw conflictErr;
+      }
+
+      // Step E: Construct definitive response
+      responsePayload = {
+        success: true,
+        message: `Successfully completed offline sale of ${qty} ticket${qty > 1 ? 's' : ''}: ${assignedTicketCodes.join(', ')}.`,
+        booking: {
+          _id: booking._id,
+          bookingCode: booking.bookingCode,
+          buyerName: booking.buyerName,
+          phone: booking.phone,
+          email: booking.email,
+          ticketQuantity: booking.ticketQuantity,
+          ticketCodes: booking.ticketCodes,
+          paymentStatus: booking.paymentStatus,
+          paymentMethod: booking.paymentMethod,
+          totalAmount: booking.totalAmount,
+          amountPaid: booking.amountPaid,
+          source: booking.source
+        },
+        tickets: assignedTicketCodes.map(code => ({
+          code,
           status: 'registered',
-          registeredAt: now,
+          bookingId: booking._id,
+          buyerName: booking.buyerName,
+          phone: booking.phone,
+          email: booking.email,
           entered: false,
-          enteredAt: null,
-          entryCount: 0
+          enteredAt: null
+        })),
+        data: {
+          booking,
+          tickets: assignedTicketCodes,
+          isConsecutive
         }
-      }
-    );
+      };
 
-    logAudit({
-      action: 'OFFLINE_SALE_CREATED',
-      bookingId: booking._id,
-      ticketCode: assignedTicketCodes.join(', '),
-      adminUsername: req.user?.username,
-      newValue: {
-        bookingCode,
-        buyerName: booking.buyerName,
-        phone: booking.phone,
-        quantity: qty,
-        tickets: assignedTicketCodes,
-        totalAmount: finalTotalAmount,
-        amountPaid: finalAmountPaid,
-        paymentMethod: normPaymentMethod,
-        isConsecutive
+      // Step F: Record IdempotencyKey inside transaction
+      if (idempotencyKey) {
+        await IdempotencyKey.create(
+          [
+            {
+              key: idempotencyKey,
+              response: responsePayload,
+              statusCode: 201,
+              createdAt: now
+            }
+          ],
+          { session }
+        );
       }
     });
 
-    const responsePayload = {
-      success: true,
-      message: `Successfully completed offline sale of ${qty} ticket${qty > 1 ? 's' : ''}: ${assignedTicketCodes.join(', ')}.`,
-      data: {
-        booking,
-        tickets: assignedTicketCodes,
-        isConsecutive
-      },
-      booking,
-      tickets: assignedTicketCodes
-    };
+    sessionCommitted = true;
 
-    // Save Idempotency Key if provided
-    if (idempotencyKey) {
-      await IdempotencyKey.create({
-        key: idempotencyKey,
-        response: responsePayload,
-        statusCode: 201,
-        createdAt: now
-      }).catch(() => {});
+    console.log(`[BOOKING_TRANSACTION_COMMIT] bookingCode=${savedBooking?.bookingCode} tickets=${assignedTicketCodes.join(',')}`);
+
+    // Invalidate cache only AFTER successful transaction commit
+    fastCache.invalidateAll();
+
+    if (savedBooking) {
+      logAudit({
+        action: 'OFFLINE_SALE_CREATED',
+        bookingId: savedBooking._id,
+        ticketCode: assignedTicketCodes.join(', '),
+        adminUsername: req.user?.username,
+        newValue: {
+          bookingCode: savedBooking.bookingCode,
+          buyerName: savedBooking.buyerName,
+          phone: savedBooking.phone,
+          quantity: qty,
+          tickets: assignedTicketCodes,
+          totalAmount: savedBooking.totalAmount,
+          amountPaid: savedBooking.amountPaid,
+          isConsecutive
+        }
+      });
     }
 
-    fastCache.invalidateAll();
     res.status(201).json(responsePayload);
   } catch (err: any) {
-    res.status(500).json({
+    console.warn(`[BOOKING_TRANSACTION_ROLLBACK] reason=${err.message}`);
+    const statusCode = err.status || (err.code === 'TICKET_CONFLICT' ? 409 : 500);
+    res.status(statusCode).json({
       success: false,
-      error: { code: 'BOOKING_ERROR', message: 'Registration failed: ' + err.message }
+      error: {
+        code: err.code || 'BOOKING_ERROR',
+        message: err.message || 'Registration failed.'
+      }
     });
+  } finally {
+    await session.endSession();
   }
 };
 
@@ -348,7 +412,7 @@ export const getBookingById = async (req: Request, res: Response): Promise<void>
   }
 
   try {
-    const id = req.params.id;
+    const id = extractParam(req.params.id);
     const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingCode: id };
     const booking = await Booking.findOne(query).lean();
 
@@ -391,7 +455,7 @@ export const updateBooking = async (req: Request, res: Response): Promise<void> 
   }
 
   try {
-    const bookingId = req.params.id;
+    const bookingId = extractParam(req.params.id);
     const { buyerName, phone, email, paymentStatus, paymentMethod, totalAmount, amountPaid, notes } = req.body;
 
     const booking = await Booking.findById(bookingId);
@@ -459,8 +523,8 @@ export const removeTicketFromBooking = async (req: Request, res: Response): Prom
   }
 
   try {
-    const bookingId = req.params.id;
-    const ticketCode = (req.params.code || '').toUpperCase().trim();
+    const bookingId = extractParam(req.params.id);
+    const ticketCode = extractParam(req.params.code).toUpperCase();
     const reason = req.body.reason || 'Removed by admin';
 
     const booking = await Booking.findById(bookingId);
@@ -551,7 +615,7 @@ export const clearBooking = async (req: Request, res: Response): Promise<void> =
   }
 
   try {
-    const { bookingCode } = req.body;
+    const bookingCode = extractParam(req.body.bookingCode);
 
     if (!bookingCode) {
       res.status(400).json({
@@ -561,7 +625,7 @@ export const clearBooking = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const booking = await Booking.findOne({ bookingCode: bookingCode.trim() });
+    const booking = await Booking.findOne({ bookingCode });
     if (!booking) {
       res.status(404).json({
         success: false,

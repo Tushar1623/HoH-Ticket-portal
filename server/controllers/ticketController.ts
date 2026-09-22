@@ -26,7 +26,7 @@ const DB_UNAVAILABLE_RESPONSE = {
   success: false,
   error: {
     code: 'DATABASE_UNAVAILABLE',
-    message: 'MongoDB Atlas is unavailable.'
+    message: 'MongoDB Atlas is unavailable. No ticket or booking changes were saved.'
   }
 };
 
@@ -918,6 +918,22 @@ export const getDatabaseStatus = async (req: Request, res: Response): Promise<vo
     const cancelled = await Ticket.countDocuments({
       status: 'cancelled'
     });
+    const totalBookings = await Booking.countDocuments();
+
+    // Consistency verification check
+    const allBookings = await Booking.find({}).lean();
+    const inconsistencies: string[] = [];
+    for (const b of allBookings) {
+      const associatedTickets = await Ticket.find({ bookingId: b._id }).lean();
+      if (associatedTickets.length !== b.ticketQuantity) {
+        inconsistencies.push(`Booking ${b.bookingCode}: quantity (${b.ticketQuantity}) != associated tickets (${associatedTickets.length})`);
+      }
+      const ticketCodes = associatedTickets.map(t => t.code).sort();
+      const bookingCodes = [...(b.ticketCodes || [])].sort();
+      if (ticketCodes.join(',') !== bookingCodes.join(',')) {
+        inconsistencies.push(`Booking ${b.bookingCode}: ticket code mismatch`);
+      }
+    }
 
     res.json({
       success: true,
@@ -929,6 +945,13 @@ export const getDatabaseStatus = async (req: Request, res: Response): Promise<vo
         registered,
         entered,
         cancelled
+      },
+      bookings: {
+        total: totalBookings
+      },
+      consistency: {
+        isConsistent: inconsistencies.length === 0,
+        issues: inconsistencies
       }
     });
   } catch (err: any) {

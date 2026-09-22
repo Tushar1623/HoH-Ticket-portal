@@ -26,7 +26,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'Idempotency-Key']
 }));
 
 app.use(express.json());
@@ -34,15 +34,25 @@ app.use(express.json());
 // Health Check
 app.get('/health', (req, res) => {
   const isConnected = mongoose.connection.readyState === 1;
-  res.status(200).json({
-    status: 'ok',
-    database: isConnected ? 'atlas_connected' : 'local_storage_active',
-    mode: isConnected ? 'cloud_atlas' : 'local_resilient_mode',
-    host: mongoose.connection.host || null,
-    dbName: mongoose.connection.name || null,
-    timestamp: new Date().toISOString(),
-    service: 'hoh-ticket-backend'
-  });
+  if (isConnected) {
+    res.status(200).json({
+      status: 'ok',
+      database: 'atlas_connected',
+      mode: 'mongodb_atlas',
+      host: mongoose.connection.host || null,
+      dbName: mongoose.connection.name || null,
+      timestamp: new Date().toISOString(),
+      service: 'hoh-ticket-backend'
+    });
+  } else {
+    res.status(503).json({
+      status: 'error',
+      database: 'unavailable',
+      mode: 'database_unavailable',
+      timestamp: new Date().toISOString(),
+      service: 'hoh-ticket-backend'
+    });
+  }
 });
 
 // API Routes
@@ -75,8 +85,7 @@ export const startServer = async () => {
       console.log('✅ MongoDB Atlas connected and initialized successfully!');
       return true;
     } catch (err: any) {
-      console.warn('⚠️ MongoDB Atlas connection deferred:', err.message);
-      console.info('💡 Running in resilient local storage mode. (If IP error: add 152.56.156.152 or 0.0.0.0/0 to Atlas Network Access)');
+      console.warn('⚠️ MongoDB Atlas connection error:', err.message);
       return false;
     }
   };

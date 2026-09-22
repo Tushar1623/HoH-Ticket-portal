@@ -2,28 +2,28 @@ import mongoose, { Schema, Document, Types } from 'mongoose';
 
 export interface IIdempotencyKey extends Document {
   _id: Types.ObjectId;
-  requestId: string;
-  action: string;
+  key: string;
   response: Record<string, any>;
+  statusCode: number;
   createdAt: Date;
   expiresAt: Date;
 }
 
 const IdempotencyKeySchema = new Schema<IIdempotencyKey>(
   {
-    requestId: {
+    key: {
       type: String,
       required: true,
       unique: true,
       index: true
     },
-    action: {
-      type: String,
-      required: true
-    },
     response: {
       type: Schema.Types.Mixed,
       required: true
+    },
+    statusCode: {
+      type: Number,
+      default: 201
     },
     createdAt: {
       type: Date,
@@ -31,15 +31,13 @@ const IdempotencyKeySchema = new Schema<IIdempotencyKey>(
     },
     expiresAt: {
       type: Date,
-      required: true,
-      index: { expireAfterSeconds: 0 } // TTL index automatically removes expired keys
+      default: () => new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hour TTL
+      index: { expireAfterSeconds: 0 }
     }
   },
   {
     versionKey: false
   }
 );
-
-
 
 export const IdempotencyKey = mongoose.model<IIdempotencyKey>('IdempotencyKey', IdempotencyKeySchema, 'idempotencyKeys');

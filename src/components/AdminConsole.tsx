@@ -248,8 +248,14 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
     }
   };
 
+  const [saleIdempotencyKey, setSaleIdempotencyKey] = useState<string>('');
+
   // Open Sale Modal from Anchor Ticket
   const openSaleModalWithAnchor = (ticket: TicketItem) => {
+    const newKey = typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `sale_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    setSaleIdempotencyKey(newKey);
     setSaleAnchor(ticket.code);
     setSaleBuyerName('');
     setSalePhone('');
@@ -307,6 +313,8 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
 
   // Confirm Offline Sale
   const handleConfirmSale = async () => {
+    if (actionLoading === 'confirm-sale') return;
+
     if (!saleBuyerName.trim()) {
       showToast('error', 'Customer Full Name is required.');
       return;
@@ -321,7 +329,11 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
     }
 
     setActionLoading('confirm-sale');
-    const idempotencyKey = `sale_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const keyToSend = saleIdempotencyKey || (
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `sale_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+    );
 
     try {
       const res = await apiClient.registerBooking({
@@ -336,11 +348,12 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
         amountPaid: saleAmountPaid,
         notes: saleNotes.trim(),
         allowOverride: saleAllowOverride,
-        idempotencyKey
+        idempotencyKey: keyToSend
       });
 
       if (res.success) {
         showToast('success', res.message || `Sale confirmed for ${salePreview.proposedCodes.join(', ')}`);
+        setSaleIdempotencyKey('');
         setShowSaleModal(false);
         setScannedTicketResult(null);
         const bookingResult = res.data?.booking;
@@ -1822,7 +1835,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
                 disabled={actionLoading === 'confirm-sale' || !salePreview.success}
                 className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 via-amber-400 to-amber-500 hover:from-amber-400 text-stone-950 font-black font-cinzel text-xs shadow-lg shadow-amber-500/25 transition-all disabled:opacity-50 cursor-pointer"
               >
-                {actionLoading === 'confirm-sale' ? 'REGISTERING...' : `CONFIRM SALE (₹${saleAmountPaid})`}
+                {actionLoading === 'confirm-sale' ? 'PROCESSING SALE...' : `CONFIRM SALE (₹${saleAmountPaid})`}
               </button>
             </div>
           </div>

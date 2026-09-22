@@ -1,4 +1,4 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import mongoose, { Schema, ClientSession } from 'mongoose';
 
 export interface ICounter {
   _id: string;
@@ -15,13 +15,24 @@ export const Counter = mongoose.model<ICounter>('Counter', CounterSchema, 'count
 /**
  * Generate a guaranteed unique, atomic, concurrent-safe booking code
  * Format: HOH-BOOK-000001
+ * Supports optional MongoDB ClientSession for transactional consistency.
  */
-export async function getNextBookingCode(): Promise<string> {
-  const counter = await Counter.findByIdAndUpdate(
+export async function getNextBookingCode(session?: ClientSession): Promise<string> {
+  const options: any = { new: true, upsert: true };
+  if (session) {
+    options.session = session;
+  }
+
+  const counter = (await Counter.findByIdAndUpdate(
     'bookingCode',
     { $inc: { seq: 1 } },
-    { new: true, upsert: true }
-  );
+    options
+  )) as unknown as ICounter | null;
+
+  if (!counter) {
+    throw new Error('Failed to generate booking code from atomic counter');
+  }
+
   const num = String(counter.seq).padStart(6, '0');
   return `HOH-BOOK-${num}`;
 }
