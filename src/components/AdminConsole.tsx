@@ -747,7 +747,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
                 </button>
                 <button
                   onClick={() => {
-                    const firstAvail = tickets.find(t => t.status === 'available');
+                    const firstAvail = tickets.find(t => (t.status === 'available' || String(t.status).toLowerCase() === 'available') && !t.bookingId && !t.buyerName);
                     if (firstAvail) openSaleModalWithAnchor(firstAvail);
                     else showToast('error', 'No available physical tickets in inventory.');
                   }}

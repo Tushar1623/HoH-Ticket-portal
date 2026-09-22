@@ -12,7 +12,8 @@ import {
   cancelTicket,
   uncancelTicket,
   clearTicketBooking,
-  resetEvent
+  resetEvent,
+  getDatabaseStatus
 } from '../controllers/ticketController';
 import {
   previewBooking,
@@ -35,8 +36,9 @@ router.use(requestIdMiddleware);
 router.post('/auth/login', login);
 router.get('/auth/me', authenticate, getMe);
 
-// --- Protected Dashboard ---
+// --- Protected Dashboard & Diagnostics ---
 router.get('/dashboard', authenticate, getDashboardStats);
+router.get('/admin/database-status', authenticate, getDatabaseStatus);
 
 // --- Protected Ticket Routes ---
 router.get('/tickets', authenticate, getTickets);

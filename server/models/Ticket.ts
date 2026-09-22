@@ -1,6 +1,6 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 
-export type TicketStatus = 'available' | 'registered' | 'cancelled' | 'AVAILABLE' | 'REGISTERED';
+export type TicketStatus = 'available' | 'registered' | 'entered' | 'cancelled';
 
 export interface ITicket extends Document {
   _id: Types.ObjectId;
@@ -42,7 +42,7 @@ const TicketSchema = new Schema<ITicket>(
     },
     status: {
       type: String,
-      enum: ['available', 'registered', 'cancelled', 'AVAILABLE', 'REGISTERED'],
+      enum: ['available', 'registered', 'entered', 'cancelled', 'AVAILABLE', 'REGISTERED', 'ENTERED', 'CANCELLED', 'active', 'reserved'],
       default: 'available',
       index: true,
       required: true

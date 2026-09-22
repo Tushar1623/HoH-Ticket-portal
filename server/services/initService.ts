@@ -18,7 +18,38 @@ export async function initializeDatabase(): Promise<void> {
   }
 
   try {
-    // 1. Idempotently ensure exactly 50 tickets HOH001 to HOH050 exist
+    // 1. Normalize any legacy ticket statuses in existing documents
+    await Ticket.updateMany(
+      { status: 'AVAILABLE' },
+      { $set: { status: 'available' } }
+    );
+    await Ticket.updateMany(
+      { status: 'CANCELLED' },
+      { $set: { status: 'cancelled' } }
+    );
+    await Ticket.updateMany(
+      { entered: true, status: { $ne: 'cancelled' } },
+      { $set: { status: 'entered' } }
+    );
+    await Ticket.updateMany(
+      {
+        status: { $in: ['REGISTERED', 'active', 'reserved'] },
+        entered: { $ne: true },
+        $or: [{ bookingId: { $ne: null } }, { buyerName: { $ne: null } }]
+      },
+      { $set: { status: 'registered' } }
+    );
+    await Ticket.updateMany(
+      {
+        status: { $in: ['REGISTERED', 'active', 'reserved'] },
+        bookingId: null,
+        buyerName: null,
+        entered: false
+      },
+      { $set: { status: 'available' } }
+    );
+
+    // 2. Idempotently ensure exactly 50 tickets HOH001 to HOH050 exist
     const existingTickets = await Ticket.find({}, { code: 1, serialNumber: 1 }).lean();
     const existingCodes = new Set(existingTickets.map(t => t.code.toUpperCase()));
     const missingTickets = [];
@@ -49,7 +80,7 @@ export async function initializeDatabase(): Promise<void> {
       console.log(`ℹ️ All 50 tickets (HOH001 to HOH050) verified in database.`);
     }
 
-    // 2. Ensure single Admin user exists
+    // 3. Ensure single Admin user exists
     const adminCount = await Admin.countDocuments();
     if (adminCount === 0) {
       console.log('👤 Initializing default Admin account...');
@@ -68,11 +99,25 @@ export async function initializeDatabase(): Promise<void> {
       console.log('✅ Admin account verified: username=admin');
     }
 
-    // 3. Ensure booking counter exists
+    // 4. Ensure booking counter exists
     const counter = await Counter.findById('bookingCode');
     if (!counter) {
       await Counter.create({ _id: 'bookingCode', seq: 0 });
     }
+
+    // 5. Authoritative Ticket Inventory Verification Logging
+    const total = await Ticket.countDocuments();
+    const available = await Ticket.countDocuments({ status: 'available', bookingId: null });
+    const registered = await Ticket.countDocuments({ status: 'registered', bookingId: { $ne: null } });
+    const entered = await Ticket.countDocuments({ status: 'entered', entered: true });
+    const cancelled = await Ticket.countDocuments({ status: 'cancelled' });
+
+    console.log('\nHOH ticket inventory verification:');
+    console.log(`Total: ${total}`);
+    console.log(`Available: ${available}`);
+    console.log(`Registered: ${registered}`);
+    console.log(`Entered: ${entered}`);
+    console.log(`Cancelled: ${cancelled}\n`);
   } catch (err: any) {
     console.error('❌ Database initialization error:', err.message);
     throw err;

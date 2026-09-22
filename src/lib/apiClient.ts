@@ -209,6 +209,44 @@ class ApiClient {
   }
 
   /**
+   * Fetch MongoDB Atlas Diagnostic Status
+   */
+  public async fetchDatabaseStatus(): Promise<ApiResponse<{
+    database: string;
+    connected: boolean;
+    tickets: {
+      total: number;
+      available: number;
+      registered: number;
+      entered: number;
+      cancelled: number;
+    };
+  }>> {
+    try {
+      const res = await fetch(apiUrl('/api/admin/database-status'), {
+        headers: this.getHeaders()
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        if (res.status === 401) this.logout();
+        return {
+          success: false,
+          error: json.error || { code: 'DIAGNOSTIC_ERROR', message: 'Failed to fetch database status.' }
+        };
+      }
+      return {
+        success: true,
+        data: json
+      };
+    } catch {
+      return {
+        success: false,
+        error: { code: 'NETWORK_ERROR', message: 'Unable to connect to database.' }
+      };
+    }
+  }
+
+  /**
    * Fetch All 50 Tickets directly from MongoDB
    */
   public async fetchTickets(params?: { search?: string; status?: string; entered?: boolean }): Promise<ApiResponse<TicketItem[]>> {

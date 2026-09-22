@@ -5,8 +5,15 @@ import { Booking } from '../models/Booking';
 import { Counter } from '../models/Counter';
 import { EventBackup } from '../models/EventBackup';
 import { logAudit } from '../services/auditService';
-import { localDataStore } from '../services/localDataStore';
 import { fastCache } from '../services/cacheService';
+
+/**
+ * Helper to safely extract string param from Express 5 req.params/req.body
+ */
+function extractParam(val: any): string {
+  if (Array.isArray(val)) return String(val[0] || '').trim();
+  return String(val || '').trim();
+}
 
 /**
  * Helper to ensure MongoDB is ready
@@ -19,42 +26,41 @@ const DB_UNAVAILABLE_RESPONSE = {
   success: false,
   error: {
     code: 'DATABASE_UNAVAILABLE',
-    message: 'Unable to connect to database. MongoDB connection is currently unavailable.'
+    message: 'MongoDB Atlas is unavailable.'
   }
 };
 
 /**
  * GET /api/dashboard
- * Live statistics directly from MongoDB with micro-caching for high throughput
+ * Live statistics calculated directly from MongoDB
  */
 export const getDashboardStats = async (req: Request, res: Response): Promise<void> => {
-  const cached = fastCache.get('dashboard_stats');
-  if (cached) {
-    res.json(cached);
-    return;
-  }
-
   if (!isDbReady()) {
-    const local = localDataStore.getDashboardStats();
-    const payload = {
-      ...local,
-      data: local.stats
-    };
-    fastCache.set('dashboard_stats', payload, 1500);
-    res.json(payload);
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const totalTickets = (await Ticket.countDocuments()) || 50;
-    const entered = await Ticket.countDocuments({ entered: true });
-    const cancelled = await Ticket.countDocuments({ status: 'cancelled' });
-    const registered = await Ticket.countDocuments({
-      status: { $in: ['registered', 'REGISTERED'] },
-      buyerName: { $ne: null }
+    const totalTickets = await Ticket.countDocuments();
+    const available = await Ticket.countDocuments({
+      status: 'available',
+      bookingId: null
     });
-    const available = Math.max(0, totalTickets - registered - cancelled);
-    const notEntered = Math.max(0, registered - entered);
+    const registered = await Ticket.countDocuments({
+      status: { $in: ['registered', 'entered'] },
+      bookingId: { $ne: null }
+    });
+    const entered = await Ticket.countDocuments({
+      status: 'entered',
+      entered: true
+    });
+    const notEntered = await Ticket.countDocuments({
+      status: 'registered',
+      bookingId: { $ne: null }
+    });
+    const cancelled = await Ticket.countDocuments({
+      status: 'cancelled'
+    });
     const attendanceRate = registered > 0 ? Math.round((entered / registered) * 100) : 0;
 
     // Financial & Booking Totals
@@ -65,7 +71,7 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
       .filter(b => b.paymentStatus !== 'Cancelled' && b.paymentStatus !== 'Refunded')
       .reduce((sum, b) => sum + (b.amountPaid ?? b.totalAmount ?? 0), 0);
 
-    // Today's Sales Calculation (Asia/Kolkata or server local date)
+    // Today's Sales Calculation
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -115,7 +121,6 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
         }
       }
     };
-    fastCache.set('dashboard_stats', payload, 1500);
     res.json(payload);
   } catch (err: any) {
     res.status(500).json({
@@ -130,29 +135,11 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
 
 /**
  * GET /api/tickets
- * Fetch tickets from MongoDB with optional search and filter (micro-cached)
+ * Fetch tickets from MongoDB with optional search and filter
  */
 export const getTickets = async (req: Request, res: Response): Promise<void> => {
-  const cacheKey = `tickets_${req.query.status || 'all'}_${req.query.search || ''}_${req.query.entered ?? ''}`;
-  const cached = fastCache.get(cacheKey);
-  if (cached) {
-    res.json(cached);
-    return;
-  }
-
   if (!isDbReady()) {
-    const list = localDataStore.getTickets({
-      status: req.query.status as string,
-      search: req.query.search as string
-    });
-    const payload = {
-      success: true,
-      count: list.length,
-      data: list,
-      tickets: list
-    };
-    fastCache.set(cacheKey, payload, 1500);
-    res.json(payload);
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -164,10 +151,20 @@ export const getTickets = async (req: Request, res: Response): Promise<void> => 
     if (status && typeof status === 'string') {
       const s = status.toLowerCase();
       if (s === 'available') {
-        query.status = { $in: ['available', 'AVAILABLE'] };
-        query.buyerName = null;
+        query.status = 'available';
+        query.bookingId = null;
       } else if (s === 'registered') {
-        query.$or = [{ status: { $in: ['registered', 'REGISTERED'] } }, { buyerName: { $ne: null } }];
+        query.status = { $in: ['registered', 'entered'] };
+        query.bookingId = { $ne: null };
+      } else if (s === 'entered') {
+        query.status = 'entered';
+        query.entered = true;
+      } else if (s === 'not-entered') {
+        query.status = 'registered';
+        query.entered = false;
+        query.bookingId = { $ne: null };
+      } else if (s === 'cancelled') {
+        query.status = 'cancelled';
       }
     }
 
@@ -195,10 +192,9 @@ export const getTickets = async (req: Request, res: Response): Promise<void> => 
 
     const enriched = tickets.map(t => {
       const b = t.bookingId ? bookingMap.get(t.bookingId.toString()) : null;
-      const isRegistered = t.status === 'registered' || t.status === 'REGISTERED' || !!t.buyerName;
       return {
         ...t,
-        status: isRegistered ? 'registered' : 'available',
+        status: t.status,
         buyerName: t.buyerName || b?.buyerName || '',
         phone: t.phone || b?.phone || '',
         email: t.email || b?.email || '',
@@ -208,23 +204,28 @@ export const getTickets = async (req: Request, res: Response): Promise<void> => 
       };
     });
 
-    // Compute stats
-    const totalTickets = 50;
-    const enteredCount = enriched.filter(t => t.entered).length;
-    const registeredCount = enriched.filter(t => t.status === 'registered' || !!t.buyerName).length;
-    const availableCount = Math.max(0, totalTickets - registeredCount);
-    const notEnteredCount = Math.max(0, registeredCount - enteredCount);
+    // Compute exact stats directly from MongoDB
+    const totalTickets = await Ticket.countDocuments();
+    const availableCount = await Ticket.countDocuments({ status: 'available', bookingId: null });
+    const registeredCount = await Ticket.countDocuments({ status: { $in: ['registered', 'entered'] }, bookingId: { $ne: null } });
+    const enteredCount = await Ticket.countDocuments({ status: 'entered', entered: true });
+    const notEnteredCount = await Ticket.countDocuments({ status: 'registered', bookingId: { $ne: null } });
+    const cancelledCount = await Ticket.countDocuments({ status: 'cancelled' });
+    const attendanceRate = registeredCount > 0 ? Math.round((enteredCount / registeredCount) * 100) : 0;
 
     res.json({
       success: true,
+      count: enriched.length,
       data: enriched,
+      tickets: enriched,
       stats: {
         totalTickets,
         registered: registeredCount,
         available: availableCount,
         entered: enteredCount,
         notEntered: notEnteredCount,
-        attendanceRate: registeredCount > 0 ? Math.round((enteredCount / registeredCount) * 100) : 0
+        cancelled: cancelledCount,
+        attendanceRate
       }
     });
   } catch (err: any) {
@@ -244,18 +245,12 @@ export const getTickets = async (req: Request, res: Response): Promise<void> => 
  */
 export const getTicketByCode = async (req: Request, res: Response): Promise<void> => {
   if (!isDbReady()) {
-    const code = (req.params.code || '').toUpperCase().trim();
-    const ticket = localDataStore.getTicketByCode(code);
-    if (!ticket) {
-      res.status(404).json({ success: false, error: { code: 'TICKET_NOT_FOUND', message: `Ticket ${code} not found.` } });
-      return;
-    }
-    res.json({ success: true, ticket });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const code = (req.params.code || '').toUpperCase().trim();
+    const code = extractParam(req.params.code).toUpperCase();
     const ticket = await Ticket.findOne({
       $or: [{ code }, { qrPayload: code }]
     }).lean();
@@ -299,17 +294,15 @@ export const getTicketByCode = async (req: Request, res: Response): Promise<void
 /**
  * PUT /api/tickets/:code/entry
  * Manual Entry: Mark ticket as ENTERED
- * Zero secondary verification: immediate atomic update
  */
 export const markTicketEntered = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Entry mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const code = (req.params.code || req.body.code || '').toUpperCase().trim();
+    const code = extractParam(req.params.code || req.body.code).toUpperCase();
 
     if (!code) {
       res.status(400).json({
@@ -328,7 +321,7 @@ export const markTicketEntered = async (req: Request, res: Response): Promise<vo
       return;
     }
 
-    if (existing.status !== 'registered' && !existing.buyerName) {
+    if (existing.status !== 'registered' && existing.status !== 'entered' && !existing.buyerName) {
       res.status(400).json({
         success: false,
         error: {
@@ -342,7 +335,7 @@ export const markTicketEntered = async (req: Request, res: Response): Promise<vo
     const now = new Date();
     const ticket = await Ticket.findOneAndUpdate(
       { code },
-      { $set: { entered: true, enteredAt: now, entryCount: 1 } },
+      { $set: { status: 'entered', entered: true, enteredAt: now, entryCount: 1 } },
       { new: true }
     );
 
@@ -375,29 +368,12 @@ export const markTicketEntered = async (req: Request, res: Response): Promise<vo
  */
 export const verifyTicket = async (req: Request, res: Response): Promise<void> => {
   if (!isDbReady()) {
-    const code = (req.body.code || req.query.code || req.params.code || '').toUpperCase().trim();
-    const ticket = localDataStore.getTicketByCode(code);
-    if (!ticket) {
-      res.status(404).json({ ok: false, error: `Ticket ${code} was not found in database.` });
-      return;
-    }
-    res.json({
-      ok: true,
-      ticket: {
-        code: ticket.code,
-        buyerName: ticket.buyerName || '',
-        bookingCode: ticket.bookingCode || '',
-        status: ticket.status,
-        entered: ticket.entered,
-        enteredAt: ticket.enteredAt,
-        guestsAllowed: 1
-      }
-    });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const code = (req.body.code || req.query.code || req.params.code || '').toUpperCase().trim();
+    const code = extractParam(req.body.code || req.query.code || req.params.code).toUpperCase();
     if (!code) {
       res.status(400).json({ ok: false, error: 'Ticket code is required' });
       return;
@@ -436,18 +412,16 @@ export const verifyTicket = async (req: Request, res: Response): Promise<void> =
 
 /**
  * PUT /api/tickets/:code/not-entry
- * Manual Entry Undo: Mark ticket as NOT ENTERED
- * Zero secondary verification: immediate atomic update
+ * Manual Entry Undo: Mark ticket as NOT ENTERED (returns to registered)
  */
 export const markTicketNotEntered = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Entry mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const code = (req.params.code || req.body.code || '').toUpperCase().trim();
+    const code = extractParam(req.params.code || req.body.code).toUpperCase();
 
     if (!code) {
       res.status(400).json({
@@ -459,7 +433,7 @@ export const markTicketNotEntered = async (req: Request, res: Response): Promise
 
     const ticket = await Ticket.findOneAndUpdate(
       { code },
-      { $set: { entered: false, enteredAt: null } },
+      { $set: { status: 'registered', entered: false, enteredAt: null, entryCount: 0 } },
       { new: true }
     );
 
@@ -512,14 +486,13 @@ export const setEntryStatus = async (req: Request, res: Response): Promise<void>
  * Admin edit ticket customer details
  */
 export const updateTicket = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Ticket mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const code = (req.params.code || req.body.code || '').toUpperCase().trim();
+    const code = extractParam(req.params.code || req.body.code).toUpperCase();
     const { buyerName, phone, email, paymentStatus, totalAmount, notes } = req.body;
 
     if (!code) {
@@ -542,7 +515,6 @@ export const updateTicket = async (req: Request, res: Response): Promise<void> =
     let booking = ticket.bookingId ? await Booking.findById(ticket.bookingId) : null;
 
     if (!booking && buyerName) {
-      // Create new booking document using atomic counter
       const { getNextBookingCode } = await import('../models/Counter');
       const bookingCode = await getNextBookingCode();
       booking = await Booking.create({
@@ -570,7 +542,7 @@ export const updateTicket = async (req: Request, res: Response): Promise<void> =
     if (buyerName !== undefined) ticket.buyerName = buyerName.trim() || null;
     if (phone !== undefined) ticket.phone = phone.trim() || null;
     if (email !== undefined) ticket.email = email.trim() || null;
-    ticket.status = ticket.buyerName ? 'registered' : 'available';
+    ticket.status = ticket.entered ? 'entered' : (ticket.buyerName ? 'registered' : 'available');
 
     await ticket.save();
 
@@ -582,6 +554,7 @@ export const updateTicket = async (req: Request, res: Response): Promise<void> =
       newValue: { buyerName: ticket.buyerName, phone: ticket.phone }
     });
 
+    fastCache.invalidateAll();
     res.json({
       success: true,
       message: `Ticket ${code} updated successfully.`,
@@ -609,17 +582,15 @@ export const updateTicket = async (req: Request, res: Response): Promise<void> =
 /**
  * DELETE /api/tickets/:code/booking & POST /api/tickets/clear
  * Clear single ticket's booking and return to AVAILABLE
- * NEVER deletes the ticket document itself!
  */
 export const clearTicketBooking = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Ticket mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const code = (req.params.code || req.body.code || '').toUpperCase().trim();
+    const code = extractParam(req.params.code || req.body.code).toUpperCase();
 
     if (!code) {
       res.status(400).json({
@@ -675,6 +646,7 @@ export const clearTicketBooking = async (req: Request, res: Response): Promise<v
     ticket.enteredAt = null;
     ticket.entryCount = 0;
     ticket.registeredAt = null;
+    ticket.cancellationReason = null;
 
     await ticket.save();
 
@@ -686,6 +658,7 @@ export const clearTicketBooking = async (req: Request, res: Response): Promise<v
       reason: 'Ticket cleared by admin'
     });
 
+    fastCache.invalidateAll();
     res.json({
       success: true,
       message: `Ticket ${code} cleared and returned to AVAILABLE pool.`,
@@ -709,7 +682,6 @@ export const clearTicketBooking = async (req: Request, res: Response): Promise<v
  * - Preserves HOH001–HOH050 and the Admin account!
  */
 export const resetEvent = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Event reset must persist to MongoDB. Never allow reset against local store.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
@@ -810,14 +782,13 @@ export const resetEvent = async (req: Request, res: Response): Promise<void> => 
  * Cancel/void a physical ticket (LOST, DAMAGED, VOID, OTHER)
  */
 export const cancelTicket = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Cancellation must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const code = (req.params.code || '').toUpperCase().trim();
+    const code = extractParam(req.params.code).toUpperCase();
     const reason = (req.body.reason || 'VOID').toUpperCase().trim();
 
     const ticket = await Ticket.findOne({ code });
@@ -829,7 +800,7 @@ export const cancelTicket = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    if (ticket.status === 'registered' || ticket.bookingId) {
+    if (ticket.status === 'registered' || ticket.status === 'entered' || ticket.bookingId) {
       res.status(400).json({
         success: false,
         error: {
@@ -842,6 +813,8 @@ export const cancelTicket = async (req: Request, res: Response): Promise<void> =
 
     ticket.status = 'cancelled';
     ticket.cancellationReason = reason;
+    ticket.entered = false;
+    ticket.enteredAt = null;
     await ticket.save();
 
     logAudit({
@@ -851,6 +824,7 @@ export const cancelTicket = async (req: Request, res: Response): Promise<void> =
       reason: `Physical ticket marked as cancelled: ${reason}`
     });
 
+    fastCache.invalidateAll();
     res.json({
       success: true,
       message: `Ticket ${code} has been cancelled (${reason}) and excluded from allocation.`,
@@ -870,14 +844,13 @@ export const cancelTicket = async (req: Request, res: Response): Promise<void> =
  * Restore a cancelled ticket back to AVAILABLE
  */
 export const uncancelTicket = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Cancellation must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
   try {
-    const code = (req.params.code || '').toUpperCase().trim();
+    const code = extractParam(req.params.code).toUpperCase();
 
     const ticket = await Ticket.findOne({ code });
     if (!ticket) {
@@ -890,6 +863,10 @@ export const uncancelTicket = async (req: Request, res: Response): Promise<void>
 
     ticket.status = 'available';
     ticket.cancellationReason = null;
+    ticket.bookingId = null;
+    ticket.buyerName = null;
+    ticket.entered = false;
+    ticket.enteredAt = null;
     await ticket.save();
 
     logAudit({
@@ -899,6 +876,7 @@ export const uncancelTicket = async (req: Request, res: Response): Promise<void>
       reason: 'Physical ticket restored to AVAILABLE'
     });
 
+    fastCache.invalidateAll();
     res.json({
       success: true,
       message: `Ticket ${code} restored to AVAILABLE.`,
@@ -909,6 +887,57 @@ export const uncancelTicket = async (req: Request, res: Response): Promise<void>
     res.status(500).json({
       success: false,
       error: { code: 'UNCANCEL_ERROR', message: 'Failed to restore ticket: ' + err.message }
+    });
+  }
+};
+
+/**
+ * GET /api/admin/database-status
+ * ADMIN-protected database diagnostic endpoint
+ */
+export const getDatabaseStatus = async (req: Request, res: Response): Promise<void> => {
+  if (!isDbReady()) {
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
+    return;
+  }
+
+  try {
+    const total = await Ticket.countDocuments();
+    const available = await Ticket.countDocuments({
+      status: 'available',
+      bookingId: null
+    });
+    const registered = await Ticket.countDocuments({
+      status: 'registered',
+      bookingId: { $ne: null }
+    });
+    const entered = await Ticket.countDocuments({
+      status: 'entered',
+      entered: true
+    });
+    const cancelled = await Ticket.countDocuments({
+      status: 'cancelled'
+    });
+
+    res.json({
+      success: true,
+      database: 'mongodb-atlas',
+      connected: true,
+      tickets: {
+        total,
+        available,
+        registered,
+        entered,
+        cancelled
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'DIAGNOSTIC_ERROR',
+        message: 'Failed to retrieve database status: ' + err.message
+      }
     });
   }
 };

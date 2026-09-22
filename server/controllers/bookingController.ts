@@ -11,7 +11,6 @@ import {
   previewAllocation
 } from '../services/allocationService';
 import { logAudit } from '../services/auditService';
-import { localDataStore } from '../services/localDataStore';
 import { fastCache } from '../services/cacheService';
 
 function isDbReady(): boolean {
@@ -22,77 +21,17 @@ const DB_UNAVAILABLE_RESPONSE = {
   success: false,
   error: {
     code: 'DATABASE_UNAVAILABLE',
-    message: 'Unable to connect to database. MongoDB connection is currently unavailable.'
+    message: 'MongoDB Atlas is unavailable.'
   }
 };
 
 /**
  * POST /api/tickets/:code/preview-sale & POST /api/bookings/preview
- * Preview allocation for physical ticket scan
+ * Preview allocation for physical ticket scan directly against MongoDB
  */
 export const previewSale = async (req: Request, res: Response): Promise<void> => {
   if (!isDbReady()) {
-    const anchorCode = (req.params.code || req.body.anchorTicket || req.body.startCode || '').trim().toUpperCase();
-    const quantity = parseInt(req.body.quantity || req.body.ticketQuantity || req.body.count, 10) || 1;
-    const allowOverride = req.body.allowOverride === true || req.body.allowNonConsecutive === true;
-
-    const anchorNum = parseInt(anchorCode.replace('HOH', ''), 10);
-    const proposedCodes: string[] = [];
-    let blockedTicket: string | null = null;
-
-    if (!anchorCode || isNaN(anchorNum)) {
-      res.status(400).json({ success: false, error: { code: 'INVALID_ANCHOR', message: 'Valid physical anchor ticket required' } });
-      return;
-    }
-
-    if (anchorNum + quantity - 1 > 50 && !allowOverride) {
-      res.json({
-        success: false,
-        message: `Requested ${quantity} seats exceed maximum capacity. Only ${Math.max(0, 50 - anchorNum + 1)} tickets remain from ${anchorCode}.`,
-        proposedCodes: [],
-        blockedTicket: 'HOH051'
-      });
-      return;
-    }
-
-    for (let i = 0; i < quantity; i++) {
-      const code = `HOH${String(anchorNum + i).padStart(3, '0')}`;
-      const t = localDataStore.getTicketByCode(code);
-      if (!t || t.status === 'cancelled' || t.status === 'registered' || t.buyerName) {
-        blockedTicket = code;
-        break;
-      }
-      proposedCodes.push(code);
-    }
-
-    if (blockedTicket && !allowOverride) {
-      res.json({
-        success: false,
-        message: `Consecutive allocation unavailable. Starting ticket: ${anchorCode}. ${blockedTicket} is already sold or void.`,
-        proposedCodes: [],
-        blockedTicket
-      });
-      return;
-    }
-
-    if (blockedTicket && allowOverride) {
-      const avail = localDataStore.getTickets({ status: 'available' });
-      const overrideCodes = avail.slice(0, quantity).map(t => t.code);
-      res.json({
-        success: true,
-        message: `Allocated ${quantity} non-consecutive available tickets.`,
-        proposedCodes: overrideCodes,
-        isConsecutive: false
-      });
-      return;
-    }
-
-    res.json({
-      success: true,
-      message: `Successfully allocated consecutive tickets from ${anchorCode} to ${proposedCodes[proposedCodes.length - 1]}.`,
-      proposedCodes,
-      isConsecutive: true
-    });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -123,7 +62,6 @@ export const previewBooking = previewSale;
  * Create physical ticket booking with anchor-driven consecutive ticket allocation
  */
 export const createBooking = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Booking creation must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
@@ -223,8 +161,19 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
       assignedTicketIds = allocation.tickets.map(t => t._id);
     }
 
-    // 3. Re-verify in database that none of these tickets have been taken concurrently
+    // 3. Re-verify in MongoDB that none of these tickets have been taken concurrently
     const currentTickets = await Ticket.find({ _id: { $in: assignedTicketIds } });
+    if (currentTickets.length !== assignedTicketIds.length) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'TICKETS_NOT_FOUND',
+          message: 'One or more selected tickets could not be found.'
+        }
+      });
+      return;
+    }
+
     const unavailable = currentTickets.find(t => t.status !== 'available' || t.bookingId !== null);
     if (unavailable) {
       res.status(409).json({
@@ -287,7 +236,8 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
           status: 'registered',
           registeredAt: now,
           entered: false,
-          enteredAt: null
+          enteredAt: null,
+          entryCount: 0
         }
       }
     );
@@ -347,22 +297,8 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
  * Fetch all bookings with live entry progress counts
  */
 export const listBookings = async (req: Request, res: Response): Promise<void> => {
-  const cached = fastCache.get('bookings_list');
-  if (cached) {
-    res.json(cached);
-    return;
-  }
-
   if (!isDbReady()) {
-    const bookings = localDataStore.listBookings();
-    const payload = {
-      success: true,
-      data: bookings,
-      bookings,
-      count: bookings.length
-    };
-    fastCache.set('bookings_list', payload, 1500);
-    res.json(payload);
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -392,7 +328,6 @@ export const listBookings = async (req: Request, res: Response): Promise<void> =
       bookings: enriched,
       count: enriched.length
     };
-    fastCache.set('bookings_list', payload, 1500);
     res.json(payload);
   } catch (err: any) {
     res.status(500).json({
@@ -408,14 +343,7 @@ export const listBookings = async (req: Request, res: Response): Promise<void> =
  */
 export const getBookingById = async (req: Request, res: Response): Promise<void> => {
   if (!isDbReady()) {
-    const id = req.params.id;
-    const booking = localDataStore.getBookingById(id);
-    if (!booking) {
-      res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: `Booking ${id} not found.` } });
-      return;
-    }
-    const tickets = booking.ticketCodes.map(c => localDataStore.getTicketByCode(c)).filter(Boolean);
-    res.json({ success: true, data: { ...booking, tickets }, booking, tickets });
+    res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
   }
 
@@ -457,7 +385,6 @@ export const getBookingById = async (req: Request, res: Response): Promise<void>
  * Edit existing booking details
  */
 export const updateBooking = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Booking mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
@@ -506,6 +433,7 @@ export const updateBooking = async (req: Request, res: Response): Promise<void> 
       newValue: { buyerName: booking.buyerName, phone: booking.phone, paymentStatus: booking.paymentStatus }
     });
 
+    fastCache.invalidateAll();
     res.json({
       success: true,
       message: `Booking ${booking.bookingCode} updated successfully.`,
@@ -576,6 +504,7 @@ export const removeTicketFromBooking = async (req: Request, res: Response): Prom
       ticket.registeredAt = null;
       ticket.entered = false;
       ticket.enteredAt = null;
+      ticket.entryCount = 0;
       await ticket.save();
     }
 
@@ -597,6 +526,7 @@ export const removeTicketFromBooking = async (req: Request, res: Response): Prom
       reason
     });
 
+    fastCache.invalidateAll();
     res.json({
       success: true,
       message: `Ticket ${ticketCode} removed from booking and returned to AVAILABLE pool.`,
@@ -615,7 +545,6 @@ export const removeTicketFromBooking = async (req: Request, res: Response): Prom
  * Clear entire booking and release all associated tickets
  */
 export const clearBooking = async (req: Request, res: Response): Promise<void> => {
-  // SECURITY: Booking mutations must persist to MongoDB. Reject when DB is unavailable.
   if (!isDbReady()) {
     res.status(503).json(DB_UNAVAILABLE_RESPONSE);
     return;
@@ -686,6 +615,7 @@ export const clearBooking = async (req: Request, res: Response): Promise<void> =
       reason: 'Entire booking cleared by admin'
     });
 
+    fastCache.invalidateAll();
     res.json({
       success: true,
       message: `Booking ${bookingCode} cleared. Tickets (${ticketCodes.join(', ')}) returned to AVAILABLE pool.`,

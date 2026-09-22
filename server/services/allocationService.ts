@@ -9,6 +9,34 @@ export interface AllocationResult {
 }
 
 /**
+ * Authoritative Server-Side Helper for Available Physical Tickets
+ * Queries MongoDB for tickets that have status: 'available' and bookingId: null,
+ * sorted by serialNumber ascending.
+ */
+export async function getAvailableTickets(session?: ClientSession): Promise<ITicket[]> {
+  const query = Ticket.find({
+    status: 'available',
+    bookingId: null
+  }).sort({ serialNumber: 1 });
+  if (session) {
+    query.session(session);
+  }
+  const res = await query.exec();
+  return res as unknown as ITicket[];
+}
+
+export async function countAvailableTickets(session?: ClientSession): Promise<number> {
+  const query = Ticket.countDocuments({
+    status: 'available',
+    bookingId: null
+  });
+  if (session) {
+    query.session(session);
+  }
+  return query.exec();
+}
+
+/**
  * DSA Consecutive Window Allocation Engine
  * Queries MongoDB for available tickets and uses sliding window
  * to find the first block of adjacent seats.
@@ -27,17 +55,7 @@ export async function findConsecutiveTickets(
     };
   }
 
-  // Query all available tickets (status = 'available', bookingId = null) sorted by serialNumber ascending
-  const query = Ticket.find({
-    status: { $in: ['available', 'AVAILABLE'] },
-    bookingId: null
-  }).sort({ serialNumber: 1 });
-
-  if (session) {
-    query.session(session);
-  }
-
-  const availableTickets = (await query.exec()) as ITicket[];
+  const availableTickets = await getAvailableTickets(session);
 
   if (availableTickets.length < quantity) {
     return {
@@ -149,7 +167,7 @@ export async function findConsecutiveFromAnchor(
   // 1. Fetch anchor ticket
   const anchorQuery = Ticket.findOne({ code: normAnchor });
   if (session) anchorQuery.session(session);
-  const anchor = await anchorQuery.exec();
+  const anchor = (await anchorQuery.exec()) as unknown as ITicket | null;
 
   if (!anchor) {
     return {
@@ -162,9 +180,9 @@ export async function findConsecutiveFromAnchor(
   }
 
   // Check anchor status
-  const anchorStatus = String(anchor.status).toLowerCase();
-  if (anchorStatus !== 'available' || anchor.bookingId !== null) {
-    if (anchorStatus === 'cancelled') {
+  const isAvail = (anchor.status === 'available' || String(anchor.status).toLowerCase() === 'available') && anchor.bookingId === null;
+  if (!isAvail) {
+    if (anchor.status === 'cancelled' || String(anchor.status).toLowerCase() === 'cancelled') {
       return {
         success: false,
         tickets: [],
@@ -214,12 +232,12 @@ export async function findConsecutiveFromAnchor(
   const serials = Array.from({ length: quantity }, (_, i) => anchor.serialNumber + i);
   const candidateQuery = Ticket.find({ serialNumber: { $in: serials } }).sort({ serialNumber: 1 });
   if (session) candidateQuery.session(session);
-  const candidates = await candidateQuery.exec();
+  const candidates = (await candidateQuery.exec()) as unknown as ITicket[];
 
   let blockedCode: string | null = null;
   for (const cand of candidates) {
-    const candStatus = String(cand.status).toLowerCase();
-    if (candStatus !== 'available' || cand.bookingId !== null) {
+    const candAvail = (cand.status === 'available' || String(cand.status).toLowerCase() === 'available') && cand.bookingId === null;
+    if (!candAvail) {
       blockedCode = cand.code;
       break;
     }
@@ -251,23 +269,23 @@ export async function findConsecutiveFromAnchor(
 
   // 4. Admin Override: Pick anchor + next available tickets
   const otherAvailableQuery = Ticket.find({
-    status: { $in: ['available', 'AVAILABLE'] },
+    status: 'available',
     bookingId: null,
     serialNumber: { $gt: anchor.serialNumber }
   }).sort({ serialNumber: 1 }).limit(quantity - 1);
   if (session) otherAvailableQuery.session(session);
-  const nextAvailable = await otherAvailableQuery.exec();
+  const nextAvailable = (await otherAvailableQuery.exec()) as unknown as ITicket[];
 
   const combined = [anchor, ...nextAvailable];
   if (combined.length < quantity) {
     // If not enough after anchor, look backwards as well
     const priorQuery = Ticket.find({
-      status: { $in: ['available', 'AVAILABLE'] },
+      status: 'available',
       bookingId: null,
       serialNumber: { $lt: anchor.serialNumber }
     }).sort({ serialNumber: 1 }).limit(quantity - combined.length);
     if (session) priorQuery.session(session);
-    const priorAvailable = await priorQuery.exec();
+    const priorAvailable = (await priorQuery.exec()) as unknown as ITicket[];
     combined.push(...priorAvailable);
   }
 
@@ -282,7 +300,7 @@ export async function findConsecutiveFromAnchor(
     };
   }
 
-  const skipped = candidates.filter(c => String(c.status).toLowerCase() !== 'available').map(c => c.code);
+  const skipped = candidates.filter(c => String(c.status).toLowerCase() !== 'available' || c.bookingId !== null).map(c => c.code);
 
   return {
     success: true,
@@ -314,10 +332,7 @@ export async function previewPhysicalSale(
   availableTotal: number;
 }> {
   const normAnchor = anchorCode.trim().toUpperCase();
-  const availableTotal = await Ticket.countDocuments({
-    status: { $in: ['available', 'AVAILABLE'] },
-    bookingId: null
-  });
+  const availableTotal = await countAvailableTickets();
 
   const result = await findConsecutiveFromAnchor(normAnchor, quantity, undefined, allowOverride);
 
@@ -374,10 +389,7 @@ export async function previewAllocation(
     };
   }
 
-  const availableCount = await Ticket.countDocuments({
-    status: { $in: ['available', 'AVAILABLE'] },
-    bookingId: null
-  });
+  const availableCount = await countAvailableTickets();
 
   const result = await findConsecutiveTickets(quantity, undefined, false, startCode);
 
