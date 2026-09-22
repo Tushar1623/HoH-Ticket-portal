@@ -9,13 +9,13 @@ export async function logAudit(params: {
   newValue?: any;
   reason?: string;
   adminUsername?: string;
+  requestId?: string;
 }): Promise<void> {
   try {
     if (mongoose.connection.readyState !== 1) {
-      // In local fallback mode, log audit action immediately without buffering
       return;
     }
-    const requestId = `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const requestId = params.requestId || `audit_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     await AuditLog.create({
       requestId,
       action: params.action,

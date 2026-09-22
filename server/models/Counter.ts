@@ -17,20 +17,21 @@ export const Counter = mongoose.model<ICounter>('Counter', CounterSchema, 'count
  * Format: HOH-BOOK-000001
  * Supports optional MongoDB ClientSession for transactional consistency.
  */
-export async function getNextBookingCode(session?: ClientSession): Promise<string> {
-  const options: any = { new: true, upsert: true };
-  if (session) {
-    options.session = session;
-  }
-
+export async function getNextBookingCode(
+  session?: ClientSession
+): Promise<string> {
   const counter = (await Counter.findByIdAndUpdate(
     'bookingCode',
     { $inc: { seq: 1 } },
-    options
+    {
+      new: true,
+      upsert: true,
+      session
+    }
   )) as unknown as ICounter | null;
 
   if (!counter) {
-    throw new Error('Failed to generate booking code from atomic counter');
+    throw new Error('Failed to generate booking code.');
   }
 
   const num = String(counter.seq).padStart(6, '0');

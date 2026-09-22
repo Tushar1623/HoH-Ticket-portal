@@ -20,11 +20,11 @@ export async function initializeDatabase(): Promise<void> {
   try {
     // 1. Normalize any legacy ticket statuses in existing documents
     await Ticket.updateMany(
-      { status: 'AVAILABLE' },
+      { status: 'AVAILABLE' as any },
       { $set: { status: 'available' } }
     );
     await Ticket.updateMany(
-      { status: 'CANCELLED' },
+      { status: 'CANCELLED' as any },
       { $set: { status: 'cancelled' } }
     );
     await Ticket.updateMany(
@@ -33,7 +33,7 @@ export async function initializeDatabase(): Promise<void> {
     );
     await Ticket.updateMany(
       {
-        status: { $in: ['REGISTERED', 'active', 'reserved'] },
+        status: { $in: ['REGISTERED', 'active', 'reserved'] as any },
         entered: { $ne: true },
         $or: [{ bookingId: { $ne: null } }, { buyerName: { $ne: null } }]
       },
@@ -41,7 +41,7 @@ export async function initializeDatabase(): Promise<void> {
     );
     await Ticket.updateMany(
       {
-        status: { $in: ['REGISTERED', 'active', 'reserved'] },
+        status: { $in: ['REGISTERED', 'active', 'reserved'] as any },
         bookingId: null,
         buyerName: null,
         entered: false

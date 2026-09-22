@@ -126,9 +126,12 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
   // 2. Check existing IdempotencyKey outside transaction to short-circuit fast duplicate retries
   if (idempotencyKey) {
     try {
-      const existingKey = await IdempotencyKey.findOne({ key: idempotencyKey });
+      const existingKey = await IdempotencyKey.findOne({
+        requestId: idempotencyKey,
+        action: 'OFFLINE_SALE_CREATED'
+      });
       if (existingKey && existingKey.response) {
-        console.log(`[IDEMPOTENCY_MATCH] key=${idempotencyKey} returning saved response.`);
+        console.log(`[IDEMPOTENCY_MATCH] requestId=${idempotencyKey} returning saved response.`);
         res.status(existingKey.statusCode || 200).json(existingKey.response);
         return;
       }
@@ -151,7 +154,10 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
     await session.withTransaction(async () => {
       // Re-check Idempotency inside transaction for strict race condition isolation
       if (idempotencyKey) {
-        const existingTxKey = await IdempotencyKey.findOne({ key: idempotencyKey }).session(session);
+        const existingTxKey = await IdempotencyKey.findOne({
+          requestId: idempotencyKey,
+          action: 'OFFLINE_SALE_CREATED'
+        }).session(session);
         if (existingTxKey && existingTxKey.response) {
           responsePayload = existingTxKey.response;
           return;
@@ -344,10 +350,12 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         await IdempotencyKey.create(
           [
             {
-              key: idempotencyKey,
+              requestId: idempotencyKey,
+              action: 'OFFLINE_SALE_CREATED',
               response: responsePayload,
               statusCode: 201,
-              createdAt: now
+              createdAt: now,
+              expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
             }
           ],
           { session }
@@ -366,6 +374,7 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         bookingId: savedBooking._id,
         ticketCode: assignedTicketCodes.join(', '),
         adminUsername: req.user?.username,
+        requestId: req.requestId,
         newValue: {
           bookingCode: savedBooking.bookingCode,
           buyerName: savedBooking.buyerName,

@@ -35,8 +35,10 @@ async function dropSampleMflix() {
       console.log('🔒 Preserving: [hoh_tickets_db, admin, local]');
       console.log('🗑️ Dropping database: sample_mflix...');
 
-      const sampleDb = conn.connection.client.db('sample_mflix');
-      await sampleDb.dropDatabase();
+      const sampleDb = (conn.connection as any).client?.db('sample_mflix');
+      if (sampleDb) {
+        await sampleDb.dropDatabase();
+      }
       console.log('✨ SUCCESS: sample_mflix dropped! ~154.64 MB of storage reclaimed.');
     }
 

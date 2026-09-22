@@ -169,7 +169,8 @@ describe('Authoritative MongoDB Inventory & Database Diagnostic Tests', () => {
     };
 
     vi.spyOn(IdempotencyKey, 'findOne').mockResolvedValue({
-      key: 'test_key_123',
+      requestId: 'test_key_123',
+      action: 'OFFLINE_SALE_CREATED',
       response: existingResponse,
       statusCode: 201
     } as any);
