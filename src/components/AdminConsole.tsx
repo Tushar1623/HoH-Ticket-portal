@@ -260,6 +260,8 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
   // Open Sale Modal from Anchor Ticket
   const openSaleModalWithAnchor = (ticket: TicketItem) => {
     console.log(`[SALE_ANCHOR_SELECTED] ${ticket.code}`);
+    console.log(`[SALE] selectedTicket = ${ticket.code}`);
+    console.log(`[SALE] saleAnchor = ${ticket.code}`);
     const newKey = typeof crypto !== 'undefined' && crypto.randomUUID
       ? crypto.randomUUID()
       : `sale_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -281,6 +283,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
 
   // Trigger Sale Preview
   const triggerSalePreview = async (anchor: string, qty: number, override: boolean) => {
+    console.log(`[SALE] preview anchor = ${anchor}`);
     setSalePreview(prev => ({ ...prev, loading: true }));
     try {
       const res = await apiClient.previewSale(anchor, qty, override);
@@ -324,6 +327,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
     if (actionLoading === 'confirm-sale') return;
 
     console.log(`[SALE_ANCHOR_SUBMIT] ${saleAnchor}`);
+    console.log(`[SALE] booking anchor = ${saleAnchor}`);
     console.log("[SALE_UI_SUBMIT]", {
       anchorTicket: saleAnchor,
       quantity: saleQuantity,
@@ -382,6 +386,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
           : salePreview.proposedCodes;
         const ticketCodesStr = ticketCodesList.join(', ');
 
+        console.log(`[SALE] backend allocated = ${ticketCodesStr}`);
         console.log("[SALE_UI_SUCCESS]", {
           bookingCode,
           ticketCodes: ticketCodesStr
@@ -1472,6 +1477,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({ onLogout }) => {
                   <button
                     key={code}
                     onClick={() => {
+                      console.log(`[INVENTORY_CLICK] code=${code}`);
                       if (ticket) {
                         if (isRegistered) setSelectedTicketDetail(ticket);
                         else openSaleModalWithAnchor(ticket);

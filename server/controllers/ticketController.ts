@@ -1108,14 +1108,22 @@ export const getTicketIntegrity = async (req: Request, res: Response): Promise<v
       buyerName: t.buyerName || null
     }));
 
+    const availableCodes = allTickets
+      .filter(t => (t.status === 'available' || String(t.status).toLowerCase() === 'available') && t.bookingId === null)
+      .map(t => t.code);
+
     res.json({
       success: true,
       total: allTickets.length,
+      missing: missingCodes,
       missingCodes,
       duplicateCodes,
       invalidSerialNumbers,
+      invalidMappings: invalidSerialNumbers,
       invalidStatuses,
+      registered: registeredTickets,
       registeredTickets,
+      available: availableCodes,
       cancelledTickets,
       orphanBookings,
       tickets: sanitizedTickets

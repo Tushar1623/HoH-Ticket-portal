@@ -1,14 +1,15 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
-import { Booking } from '../models/Booking';
+import { Booking, IBooking } from '../models/Booking';
 import { Ticket } from '../models/Ticket';
 import { IdempotencyKey } from '../models/IdempotencyKey';
 import { getNextBookingCode } from '../models/Counter';
 import {
-  findConsecutiveFromAnchor,
   findConsecutiveTickets,
+  findConsecutiveFromAnchor,
+  previewAllocation,
   previewPhysicalSale,
-  previewAllocation
+  normalizeTicketCode
 } from '../services/allocationService';
 import { logAudit } from '../services/auditService';
 import { fastCache } from '../services/cacheService';
@@ -41,7 +42,8 @@ export const previewSale = async (req: Request, res: Response): Promise<void> =>
   }
 
   try {
-    const anchorCode = extractParam(req.params.code || req.body.anchorTicket || req.body.startCode).toUpperCase();
+    const rawAnchor = extractParam(req.params.code || req.body.anchorTicket || req.body.startCode);
+    const anchorCode = normalizeTicketCode(rawAnchor);
     const quantity = parseInt(req.body.quantity || req.body.ticketQuantity || req.body.count, 10) || 1;
     const allowOverride = req.body.allowOverride === true || req.body.allowNonConsecutive === true;
 
@@ -86,7 +88,8 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
 
   const qty = parseInt(ticketQuantity || quantity, 10);
   const idempotencyKey = extractParam(req.headers['idempotency-key'] || req.body.idempotencyKey);
-  const anchor = extractParam(anchorTicket || startCode).toUpperCase();
+  const rawAnchor = extractParam(anchorTicket || startCode);
+  const anchor = normalizeTicketCode(rawAnchor);
   const canOverride = allowNonConsecutive || allowOverride;
 
   console.log(`[BOOKING_REQUEST_RECEIVED] anchor=${anchor || 'AUTO'} qty=${qty || 1} idempotencyKey=${idempotencyKey || 'none'}`);
@@ -127,7 +130,7 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
   if (idempotencyKey) {
     try {
       const existingKey = await IdempotencyKey.findOne({
-        requestId: idempotencyKey,
+        $or: [{ key: idempotencyKey }, { requestId: idempotencyKey }],
         action: 'OFFLINE_SALE_CREATED'
       });
       if (existingKey && existingKey.response) {
@@ -155,7 +158,7 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
       // Re-check Idempotency inside transaction for strict race condition isolation
       if (idempotencyKey) {
         const existingTxKey = await IdempotencyKey.findOne({
-          requestId: idempotencyKey,
+          $or: [{ key: idempotencyKey }, { requestId: idempotencyKey }],
           action: 'OFFLINE_SALE_CREATED'
         }).session(session);
         if (existingTxKey && existingTxKey.response) {
@@ -350,6 +353,7 @@ export const createBooking = async (req: Request, res: Response): Promise<void> 
         await IdempotencyKey.create(
           [
             {
+              key: idempotencyKey,
               requestId: idempotencyKey,
               action: 'OFFLINE_SALE_CREATED',
               response: responsePayload,

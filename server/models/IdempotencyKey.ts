@@ -2,7 +2,8 @@ import mongoose, { Schema, Document, Types } from 'mongoose';
 
 export interface IIdempotencyKey extends Document {
   _id: Types.ObjectId;
-  requestId: string;
+  key?: string;
+  requestId?: string;
   action: string;
   response: Record<string, any>;
   statusCode: number;
@@ -12,10 +13,12 @@ export interface IIdempotencyKey extends Document {
 
 const IdempotencyKeySchema = new Schema<IIdempotencyKey>(
   {
+    key: {
+      type: String,
+      index: true
+    },
     requestId: {
       type: String,
-      required: true,
-      unique: true,
       index: true
     },
     action: {
@@ -48,6 +51,12 @@ const IdempotencyKeySchema = new Schema<IIdempotencyKey>(
   }
 );
 
+IdempotencyKeySchema.pre('save', function () {
+  if (this.key && !this.requestId) this.requestId = this.key;
+  if (this.requestId && !this.key) this.key = this.requestId;
+});
+
+IdempotencyKeySchema.index({ key: 1, action: 1 });
 IdempotencyKeySchema.index({ requestId: 1, action: 1 });
 
 export const IdempotencyKey = mongoose.model<IIdempotencyKey>('IdempotencyKey', IdempotencyKeySchema, 'idempotencyKeys');

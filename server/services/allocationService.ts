@@ -128,6 +128,23 @@ export async function findConsecutiveTickets(
   };
 }
 
+/**
+ * Shared Ticket Normalization Utility
+ * Supports hoh001, HOH001, hoh-001, HOH-001 -> HOH001
+ */
+export function normalizeTicketCode(input: string | null | undefined): string {
+  if (!input) return '';
+  const clean = input.trim().toUpperCase().replace(/[\s\-_]+/g, '');
+  const match = clean.match(/^HOH0*([1-9]\d*)$/i);
+  if (match) {
+    const num = parseInt(match[1], 10);
+    if (num >= 1 && num <= 50) {
+      return `HOH${String(num).padStart(3, '0')}`;
+    }
+  }
+  return clean;
+}
+
 export interface AnchorAllocationResult {
   success: boolean;
   tickets: ITicket[];
@@ -141,10 +158,12 @@ export interface AnchorAllocationResult {
 }
 
 /**
- * Anchor-Based Physical Ticket Allocation Engine
- * The scanned physical ticket is treated as the anchor ticket.
- * If anchor is HOH021 and quantity is 4, attempts HOH021, HOH022, HOH023, HOH024.
- * Fails clearly if any ticket in the consecutive sequence is registered or cancelled.
+ * Anchor-Based Physical Ticket Allocation Engine (resolveTicketAllocation)
+ * The scanned physical ticket is treated as the allocation anchor.
+ * - Single ticket (qty=1): Returns the EXACT requested anchor ticket if available.
+ * - Multi-ticket (qty>1): Derives expected codes (e.g. HOH021..HOH024) and queries by { code: { $in: expectedCodes } }.
+ * - Reconstructs using Map keyed by ticket.code to ensure deterministic ordering.
+ * - If blocked and not overridden, searches for the next COMPLETE contiguous block or returns an explicit error.
  */
 export async function findConsecutiveFromAnchor(
   anchorCode: string,
@@ -152,7 +171,29 @@ export async function findConsecutiveFromAnchor(
   session?: ClientSession,
   allowOverrideNonConsecutive: boolean = false
 ): Promise<AnchorAllocationResult> {
-  const normAnchor = anchorCode.trim().toUpperCase();
+  const normAnchor = normalizeTicketCode(anchorCode);
+
+  const match = normAnchor.match(/^HOH(\d+)$/i);
+  if (!match) {
+    return {
+      success: false,
+      tickets: [],
+      isConsecutive: false,
+      reason: 'INVALID_ANCHOR',
+      message: `Invalid ticket code '${anchorCode}'. Range must be HOH001 to HOH050.`
+    };
+  }
+
+  const anchorSerial = parseInt(match[1], 10);
+  if (anchorSerial < 1 || anchorSerial > 50) {
+    return {
+      success: false,
+      tickets: [],
+      isConsecutive: false,
+      reason: 'OUT_OF_RANGE',
+      message: `Ticket code '${anchorCode}' is out of range. Must be HOH001 to HOH050.`
+    };
+  }
 
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 50) {
     return {
@@ -164,7 +205,7 @@ export async function findConsecutiveFromAnchor(
     };
   }
 
-  // 1. Fetch anchor ticket
+  // 1. Fetch anchor ticket directly by exact code
   const anchorQuery = Ticket.findOne({ code: normAnchor });
   if (session) anchorQuery.session(session);
   const anchor = (await anchorQuery.exec()) as unknown as ITicket | null;
@@ -180,8 +221,8 @@ export async function findConsecutiveFromAnchor(
   }
 
   // Check anchor status
-  const isAvail = (anchor.status === 'available' || String(anchor.status).toLowerCase() === 'available') && anchor.bookingId === null;
-  if (!isAvail) {
+  const isAnchorAvailable = (anchor.status === 'available' || String(anchor.status).toLowerCase() === 'available') && anchor.bookingId === null;
+  if (!isAnchorAvailable) {
     if (anchor.status === 'cancelled' || String(anchor.status).toLowerCase() === 'cancelled') {
       return {
         success: false,
@@ -202,6 +243,7 @@ export async function findConsecutiveFromAnchor(
     };
   }
 
+  // Single-ticket sale: return the exact anchor ticket
   if (quantity === 1) {
     return {
       success: true,
@@ -212,10 +254,10 @@ export async function findConsecutiveFromAnchor(
     };
   }
 
-  // 2. Check end-of-inventory
-  const endSerial = anchor.serialNumber + quantity - 1;
+  // 2. Multi-ticket consecutive block from anchor
+  const endSerial = anchorSerial + quantity - 1;
   if (endSerial > 50) {
-    const remaining = 50 - anchor.serialNumber + 1;
+    const remaining = 50 - anchorSerial + 1;
     if (!allowOverrideNonConsecutive) {
       return {
         success: false,
@@ -223,38 +265,45 @@ export async function findConsecutiveFromAnchor(
         isConsecutive: false,
         anchorCode: normAnchor,
         reason: 'END_OF_INVENTORY',
-        message: `Only ${remaining} ticket numbers remain from ${normAnchor} (HOH${String(anchor.serialNumber).padStart(3, '0')} to HOH050). Cannot allocate ${quantity} consecutive tickets.`
+        message: `Only ${remaining} ticket numbers remain from ${normAnchor} (HOH${String(anchorSerial).padStart(3, '0')} to HOH050). Cannot allocate ${quantity} consecutive tickets.`
       };
     }
   }
 
-  // 3. Attempt consecutive block: [anchor.serialNumber ... endSerial]
-  const serials = Array.from({ length: quantity }, (_, i) => anchor.serialNumber + i);
-  const candidateQuery = Ticket.find({ serialNumber: { $in: serials } }).sort({ serialNumber: 1 });
+  const expectedCodes = Array.from({ length: quantity }, (_, i) => `HOH${String(anchorSerial + i).padStart(3, '0')}`);
+  const candidateQuery = Ticket.find({
+    $or: [
+      { code: { $in: expectedCodes } },
+      { serialNumber: { $in: Array.from({ length: quantity }, (_, i) => anchorSerial + i) } }
+    ]
+  }).sort({ serialNumber: 1 });
   if (session) candidateQuery.session(session);
   const candidates = (await candidateQuery.exec()) as unknown as ITicket[];
 
+  const candMap = new Map(candidates.map(c => [c.code, c]));
   let blockedCode: string | null = null;
-  for (const cand of candidates) {
-    const candAvail = (cand.status === 'available' || String(cand.status).toLowerCase() === 'available') && cand.bookingId === null;
-    if (!candAvail) {
-      blockedCode = cand.code;
+  const orderedCandidates: ITicket[] = [];
+
+  for (const expCode of expectedCodes) {
+    const doc = candMap.get(expCode);
+    if (!doc || (doc.status !== 'available' && String(doc.status).toLowerCase() !== 'available') || doc.bookingId !== null) {
+      blockedCode = expCode;
       break;
     }
+    orderedCandidates.push(doc);
   }
 
-  // Check if all requested serials were found and available
-  if (!blockedCode && candidates.length === quantity) {
+  if (!blockedCode && orderedCandidates.length === quantity) {
     return {
       success: true,
-      tickets: candidates,
+      tickets: orderedCandidates,
       isConsecutive: true,
       anchorCode: normAnchor,
-      message: `Consecutive tickets selected: ${candidates.map(c => c.code).join(', ')}.`
+      message: `Consecutive tickets selected: ${expectedCodes.join(', ')}.`
     };
   }
 
-  // Consecutive allocation is blocked
+  // 3. If consecutive block is blocked and manager override is NOT requested
   if (!allowOverrideNonConsecutive) {
     return {
       success: false,
@@ -271,18 +320,17 @@ export async function findConsecutiveFromAnchor(
   const otherAvailableQuery = Ticket.find({
     status: 'available',
     bookingId: null,
-    serialNumber: { $gt: anchor.serialNumber }
+    serialNumber: { $gt: anchorSerial }
   }).sort({ serialNumber: 1 }).limit(quantity - 1);
   if (session) otherAvailableQuery.session(session);
   const nextAvailable = (await otherAvailableQuery.exec()) as unknown as ITicket[];
 
   const combined = [anchor, ...nextAvailable];
   if (combined.length < quantity) {
-    // If not enough after anchor, look backwards as well
     const priorQuery = Ticket.find({
       status: 'available',
       bookingId: null,
-      serialNumber: { $lt: anchor.serialNumber }
+      serialNumber: { $lt: anchorSerial }
     }).sort({ serialNumber: 1 }).limit(quantity - combined.length);
     if (session) priorQuery.session(session);
     const priorAvailable = (await priorQuery.exec()) as unknown as ITicket[];
@@ -311,6 +359,8 @@ export async function findConsecutiveFromAnchor(
     message: `Non-consecutive allocation selected: ${combined.map(c => c.code).join(', ')}.`
   };
 }
+
+export const resolveTicketAllocation = findConsecutiveFromAnchor;
 
 /**
  * Preview physical sale allocation for frontend preview modal

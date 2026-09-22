@@ -23,11 +23,15 @@ describe('Ticket Code Validation & Normalization (BR 01, BR 02)', () => {
     expect(isValidTicketCode('HOH025')).toBe(true);
   });
 
-  it('should normalize lowercase input and surrounding spaces', () => {
+  it('should normalize lowercase input, hyphens, and surrounding spaces', () => {
     expect(normalizeTicketCode('hoh001')).toBe('HOH001');
+    expect(normalizeTicketCode('HOH001')).toBe('HOH001');
+    expect(normalizeTicketCode('hoh-001')).toBe('HOH001');
+    expect(normalizeTicketCode('HOH-001')).toBe('HOH001');
     expect(normalizeTicketCode('  HOH050  ')).toBe('HOH050');
-    expect(normalizeTicketCode('  hoh017  ')).toBe('HOH017');
-    expect(isValidTicketCode('  hoh017  ')).toBe(true);
+    expect(normalizeTicketCode('  hoh-017  ')).toBe('HOH017');
+    expect(normalizeTicketCode('hoh-21')).toBe('HOH021');
+    expect(isValidTicketCode('  hoh-017  ')).toBe(true);
   });
 
   it('should reject out-of-range codes and invalid payloads', () => {

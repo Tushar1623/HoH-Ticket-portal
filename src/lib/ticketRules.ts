@@ -12,11 +12,19 @@ export const VALID_TICKET_CODES: string[] = Array.from({ length: TOTAL_TICKETS }
 });
 
 /**
- * Normalizes input string (e.g. "  hoh017  " -> "HOH017")
+ * Normalizes input string (e.g. "hoh001", "hoh-001", "HOH-001" -> "HOH001")
  */
 export function normalizeTicketCode(input: string | null | undefined): string {
   if (!input) return '';
-  return input.trim().toUpperCase();
+  const clean = input.trim().toUpperCase().replace(/[\s\-_]+/g, '');
+  const match = clean.match(/^HOH0*([1-9]\d*)$/i);
+  if (match) {
+    const num = parseInt(match[1], 10);
+    if (num >= 1 && num <= 50) {
+      return `${TICKET_PREFIX}${String(num).padStart(3, '0')}`;
+    }
+  }
+  return clean;
 }
 
 /**

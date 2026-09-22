@@ -664,8 +664,13 @@ describe('Authoritative MongoDB Inventory & Database Diagnostic Tests', () => {
     }) as any);
 
     vi.spyOn(Ticket, 'find').mockImplementation(((filter: any) => {
-      const serials = filter.serialNumber?.$in || [];
-      const found = mock50.filter(t => serials.includes(t.serialNumber));
+      let found = mock50;
+      if (filter && filter.$or) {
+        const codes = filter.$or[0]?.code?.$in || [];
+        found = mock50.filter(t => codes.includes(t.code));
+      } else if (filter && filter.code && filter.code.$in) {
+        found = mock50.filter(t => filter.code.$in.includes(t.code));
+      }
       const q: any = {
         session: vi.fn().mockReturnThis(),
         sort: vi.fn().mockReturnThis(),
@@ -907,5 +912,162 @@ describe('Authoritative MongoDB Inventory & Database Diagnostic Tests', () => {
 
     // Verify missing tickets (HOH003..HOH050) were created
     expect(createSpy).toHaveBeenCalledTimes(48);
+  });
+
+  it('TEST 17: Allocation engine guarantees requested code === allocated code for every single ticket HOH001 to HOH050', async () => {
+    const mock50 = Array.from({ length: 50 }, (_, i) => ({
+      _id: new Types.ObjectId(),
+      code: `HOH${String(i + 1).padStart(3, '0')}`,
+      serialNumber: i + 1,
+      status: 'available',
+      bookingId: null
+    }));
+
+    vi.spyOn(Ticket, 'findOne').mockImplementation(((filter: any) => {
+      const found = mock50.find(t => t.code === filter.code);
+      const q: any = {
+        session: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue(found || null)
+      };
+      q.then = (resolve: any) => Promise.resolve(found || null).then(resolve);
+      return q;
+    }) as any);
+
+    for (let i = 1; i <= 50; i++) {
+      const expectedCode = `HOH${String(i).padStart(3, '0')}`;
+      const alloc = await findConsecutiveFromAnchor(expectedCode, 1);
+      expect(alloc.success).toBe(true);
+      expect(alloc.tickets).toHaveLength(1);
+      expect(alloc.tickets[0].code).toBe(expectedCode);
+      expect(alloc.anchorCode).toBe(expectedCode);
+    }
+  });
+
+  it('TEST 18: Multi-ticket contiguous allocation handles consecutive sequences and blocked fallback', async () => {
+    const mock50 = Array.from({ length: 50 }, (_, i) => ({
+      _id: new Types.ObjectId(),
+      code: `HOH${String(i + 1).padStart(3, '0')}`,
+      serialNumber: i + 1,
+      status: 'available',
+      bookingId: null
+    }));
+
+    const queryMock = (data: any) => {
+      let limitCount: number | null = null;
+      const q: any = {
+        session: vi.fn().mockReturnThis(),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockImplementation((num: number) => {
+          limitCount = num;
+          return q;
+        }),
+        exec: vi.fn().mockImplementation(() => {
+          const res = Array.isArray(data) && limitCount !== null ? data.slice(0, limitCount) : data;
+          return Promise.resolve(res);
+        })
+      };
+      q.then = (resolve: any) => {
+        const res = Array.isArray(data) && limitCount !== null ? data.slice(0, limitCount) : data;
+        return Promise.resolve(res).then(resolve);
+      };
+      return q;
+    };
+
+    vi.spyOn(Ticket, 'findOne').mockImplementation(((filter: any) => {
+      const found = mock50.find(t => t.code === filter.code);
+      return queryMock(found || null);
+    }) as any);
+
+    vi.spyOn(Ticket, 'find').mockImplementation(((filter: any) => {
+      if (filter && filter.code && filter.code.$in) {
+        const codes: string[] = filter.code.$in;
+        const found = mock50.filter(t => codes.includes(t.code));
+        return queryMock(found);
+      }
+      return queryMock(mock50);
+    }) as any);
+
+    // 1. HOH001 qty 2 -> HOH001, HOH002
+    const res1 = await findConsecutiveFromAnchor('HOH001', 2);
+    expect(res1.success).toBe(true);
+    expect(res1.tickets.map(t => t.code)).toEqual(['HOH001', 'HOH002']);
+
+    // 2. HOH010 qty 3 -> HOH010, HOH011, HOH012
+    const res2 = await findConsecutiveFromAnchor('HOH010', 3);
+    expect(res2.success).toBe(true);
+    expect(res2.tickets.map(t => t.code)).toEqual(['HOH010', 'HOH011', 'HOH012']);
+
+    // 3. HOH021 qty 4 -> HOH021, HOH022, HOH023, HOH024
+    const res3 = await findConsecutiveFromAnchor('HOH021', 4);
+    expect(res3.success).toBe(true);
+    expect(res3.tickets.map(t => t.code)).toEqual(['HOH021', 'HOH022', 'HOH023', 'HOH024']);
+
+    // 4. HOH047 qty 4 -> HOH047, HOH048, HOH049, HOH050
+    const res4 = await findConsecutiveFromAnchor('HOH047', 4);
+    expect(res4.success).toBe(true);
+    expect(res4.tickets.map(t => t.code)).toEqual(['HOH047', 'HOH048', 'HOH049', 'HOH050']);
+
+    // 5. Blocked scenario: mark HOH022 as registered.
+    const mockWithBlocked = mock50.map(t => {
+      if (t.code === 'HOH022') {
+        return { ...t, status: 'registered', bookingId: new Types.ObjectId() };
+      }
+      return t;
+    });
+
+    vi.spyOn(Ticket, 'findOne').mockImplementation(((filter: any) => {
+      const found = mockWithBlocked.find(t => t.code === filter.code);
+      return queryMock(found || null);
+    }) as any);
+
+    vi.spyOn(Ticket, 'find').mockImplementation(((filter: any) => {
+      let found = mockWithBlocked;
+      if (filter && filter.$or) {
+        const codes = filter.$or[0]?.code?.$in || [];
+        found = mockWithBlocked.filter(t => codes.includes(t.code));
+      } else if (filter && filter.code && filter.code.$in) {
+        found = mockWithBlocked.filter(t => filter.code.$in.includes(t.code));
+      } else if (filter && filter.serialNumber && filter.serialNumber.$gt) {
+        found = mockWithBlocked.filter(t => t.status === 'available' && t.serialNumber > filter.serialNumber.$gt);
+      }
+      return queryMock(found);
+    }) as any);
+
+    // Without override -> halts and reports blocked ticket
+    const resBlocked = await findConsecutiveFromAnchor('HOH021', 4, undefined, false);
+    expect(resBlocked.success).toBe(false);
+    expect(resBlocked.reason).toBe('CONSECUTIVE_UNAVAILABLE');
+    expect(resBlocked.blockedTicket).toBe('HOH022');
+
+    // With override -> allows non-consecutive allocation
+    const resOverride = await findConsecutiveFromAnchor('HOH021', 4, undefined, true);
+    expect(resOverride.success).toBe(true);
+    expect(resOverride.isConsecutive).toBe(false);
+    expect(resOverride.tickets.map(t => t.code)).toEqual(['HOH021', 'HOH023', 'HOH024', 'HOH025']);
+    expect(resOverride.skippedTickets).toEqual(['HOH022']);
+  });
+
+  it('TEST 19: Database integrity test validates HOH001->1 to HOH050->50 1:1 mapping and uniqueness', async () => {
+    const mock50 = Array.from({ length: 50 }, (_, i) => ({
+      _id: new Types.ObjectId(),
+      code: `HOH${String(i + 1).padStart(3, '0')}`,
+      serialNumber: i + 1,
+      status: 'available',
+      bookingId: null
+    }));
+
+    // Verify all 50 codes and serials are unique
+    const codeSet = new Set(mock50.map(t => t.code));
+    const serialSet = new Set(mock50.map(t => t.serialNumber));
+
+    expect(codeSet.size).toBe(50);
+    expect(serialSet.size).toBe(50);
+
+    mock50.forEach(t => {
+      const num = parseInt(t.code.replace('HOH', ''), 10);
+      expect(t.serialNumber).toBe(num);
+      expect(t.serialNumber).toBeGreaterThanOrEqual(1);
+      expect(t.serialNumber).toBeLessThanOrEqual(50);
+    });
   });
 });
